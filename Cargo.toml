@@ -1,48 +1,36 @@
 [package]
-name = "tauri-runtime-verso"
+name = "verso-standalone"
 version = "0.1.0"
 edition = "2024"
 
 [workspace]
 members = [
-    "tauri-runtime-verso-build",
-    # Examples
-    "examples/helloworld",
-    "examples/api/src-tauri",
+    "examples/winit_hello",
 ]
 
-[workspace.dependencies]
-verso = { git = "https://github.com/tauri-apps/verso", rev = "572f47ca7ead69ce3e8b0c433e5cff237f0514c9" }
-versoview_build = { git = "https://github.com/tauri-apps/verso", rev = "572f47ca7ead69ce3e8b0c433e5cff237f0514c9" }
 
-[features]
-# Required if you use tauri's macos-private-api feature
-macos-private-api = ["tauri-runtime/macos-private-api"]
+
+
 
 [dependencies]
-verso = { workspace = true }
-tauri = { version = "=2.7.0", default-features = false }
-tauri-runtime = "=2.7.1"
-tauri-utils = "=2.6.0"
-tao = "0.34"
+
+winit = "0.29"
 raw-window-handle = "0.6"
-url = "2"
-http = "1"
-percent-encoding = "2"
-log = "0.4"
+raw-display-handle = "0.6"
 
-[target."cfg(windows)".dependencies]
-windows = "0.61"
 
-[target."cfg(any(target_os = \"linux\", target_os = \"dragonfly\", target_os = \"freebsd\", target_os = \"openbsd\", target_os = \"netbsd\"))".dependencies]
-gtk = { version = "0.18", features = ["v3_24"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.3", features = ["NSScreen"] }
 
-[patch."https://github.com/tauri-apps/verso"]
-# verso = { path = "../verso/verso" }
-# versoview_build = { path = "../verso/versoview_build" }
+
+
+
+
+
+
+
+
+
+
 
 [lints.clippy]
 needless_doctest_main = "allow"
