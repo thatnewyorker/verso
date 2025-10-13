@@ -18,7 +18,8 @@ Typical flow:
 3) Start the event loop with `WinitRuntime::run`.
 4) From another thread (after the event loop starts), call `create_window(...)`.
 5) Build NativeSurfaceHandles from the created window and bind a VersoWebviewHost.
-6) Map input and handle redraws via event subscribers (to be added by your app).
+6) Attach the host to the runtime, then register a basic controller event subscriber
+   that forwards input and draw events to the mock controller (until the real runtime is enabled).
 */
 
 use verso_standalone::{
@@ -86,13 +87,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // webview.bind_native_surface(surface_handles)?;
     // webview.load("https://example.com")?;
     //
-    // Step 4: Run the event loop (blocks). Create windows from a non-UI thread after this starts.
+    // Step 4: Attach the host to the runtime so subscribers can forward input and draw events:
+    //
+    // runtime.attach_host(window_handle, webview)?;
+    //
+    // Step 5: Register a basic controller event subscriber (mock-only wiring shown here).
+    // This subscriber forwards WindowEvent/DeviceEvent to the controller via the host
+    // and triggers draws on RedrawRequested. The type is available via the crate’s
+    // re-exports once exposed; until then, use the module path where it is defined.
+    //
+    // use verso_standalone::ControllerEventSubscriber; // if re-exported by the crate
+    // // or, if not re-exported yet, use the internal module path once made public:
+    // // use verso_standalone::winit_runtime::ControllerEventSubscriber;
+    // runtime.add_subscriber(window_handle, ControllerEventSubscriber::new(window_handle))?;
+    //
+    // Step 6: Run the event loop (blocks). Create windows from a non-UI thread after this starts.
     // runtime.run(|_user_event: ()| {
     //     // Handle custom user events posted to the event loop (if any)
     // })?;
 
     println!(
-        "Skeleton updated. Use create_window from a non-UI thread after `run` starts to avoid deadlocks."
+        "Skeleton updated. Mock-only wiring is illustrated in comments: bind a VersoWebviewHost, attach it to the runtime, and register a ControllerEventSubscriber to forward input and draw events."
     );
     Ok(())
 }

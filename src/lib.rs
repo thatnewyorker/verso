@@ -36,12 +36,31 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+mod controller;
 mod winit_runtime;
 
-/// Public API re-exports for the winit integration.
+#[cfg(feature = "versoview-runtime")]
+mod in_process_controller;
+
+#[cfg(feature = "versoview-runtime")]
+mod ipc_controller;
+
+#[cfg(feature = "versoview-runtime")]
+pub mod ipc_protocol;
+
+#[cfg(feature = "versoview-runtime")]
+pub mod ipc_transport;
+#[cfg(all(unix, feature = "zero_copy"))]
+pub mod transport_unix;
+
+pub use crate::controller::{
+    ButtonState, ControllerConfig, ControllerMode, InputEvent, MockWebviewController,
+    WebviewController,
+};
+/// Public API re-exports for the winit integration and controller abstraction.
 pub use crate::winit_runtime::{
-    NativeSurfaceHandles, VersoWebviewHost, WinitRuntime, WinitWindowHandle, logical_to_physical,
-    map_winit_key, map_winit_mouse_button,
+    ControllerEventSubscriber, NativeSurfaceHandles, VersoWebviewHost, WinitRuntime,
+    WinitWindowHandle, logical_to_physical, map_winit_key, map_winit_mouse_button,
 };
 
 static VERSO_PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -64,6 +83,10 @@ fn get_verso_path() -> &'static Path {
             "Verso path not set! You need to call set_verso_path before creating any webviews!",
         )
     })
+}
+
+pub fn verso_path() -> &'static Path {
+    get_verso_path()
 }
 
 fn relative_command_path(name: &str) -> Option<PathBuf> {
@@ -95,6 +118,10 @@ fn get_verso_resource_directory() -> Option<PathBuf> {
     VERSO_RESOURCES_DIRECTORY.lock().unwrap().clone()
 }
 
+pub fn verso_resource_directory() -> Option<PathBuf> {
+    get_verso_resource_directory()
+}
+
 /// Initialization script string to bootstrap the Verso invoke system in created webviews.
 ///
 /// Note:
@@ -117,6 +144,10 @@ pub fn set_verso_devtools_port(port: u16) {
 
 fn get_verso_devtools_port() -> Option<u16> {
     *DEV_TOOLS_PORT.lock().unwrap()
+}
+
+pub fn verso_devtools_port() -> Option<u16> {
+    get_verso_devtools_port()
 }
 
 pub mod winit_api {

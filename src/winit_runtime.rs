@@ -24,15 +24,20 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, mpsc};
 
+use crate::ControllerMode;
+#[cfg(not(feature = "versoview-runtime"))]
+use crate::controller::MockWebviewController;
+use crate::controller::{ButtonState, ControllerConfig, InputEvent, WebviewController};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, WindowEvent};
+use winit::event::{DeviceEvent, ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::window::{CursorGrabMode, CursorIcon, Window, WindowAttributes, WindowId};
 
 /// Publicly re-export common winit identifiers that downstream users often need.
-pub use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
-pub use winit::keyboard::{Key, ModifiersState, NamedKey};
+pub use winit::dpi::{LogicalSize, PhysicalSize};
+pub use winit::keyboard::Key;
 
 /// Errors that may be produced by the runtime layer.
 #[derive(Debug)]
@@ -81,6 +86,10 @@ pub enum InternalCommand {
     SetCursorVisible(WindowId, bool),
     SetCursorGrab(WindowId, bool),
     CloseWindow(WindowId),
+    GetNativeSurfaceHandles {
+        window_id: WindowId,
+        respond_to: mpsc::Sender<NativeSurfaceHandles>,
+    },
     // Future: Resize, Minimize, Fullscreen, etc.
 }
 
@@ -200,13 +209,18 @@ pub trait EventSubscriber<T = ()>: Send {
 }
 
 /// Mutable dispatch-time context passed to event subscribers.
-pub struct DispatchContext<'a, T = ()> {
+pub struct DispatchContext<'a, T: 'static = ()> {
     runtime: &'a WinitRuntime<T>,
+    host: Option<&'a mut VersoWebviewHost>,
 }
 
-impl<'a, T> DispatchContext<'a, T> {
+impl<'a, T: 'static> DispatchContext<'a, T> {
     pub fn runtime(&self) -> &WinitRuntime<T> {
         self.runtime
+    }
+
+    pub fn host_mut(&mut self) -> Option<&mut VersoWebviewHost> {
+        self.host.as_deref_mut()
     }
 }
 
@@ -225,15 +239,17 @@ pub struct NativeSurfaceHandles {
 /// instance that renders into the native window represented by the handle.
 pub struct VersoWebviewHost {
     window: WinitWindowHandle,
-    // Future: store the Verso controller here.
-    // controller: verso::VersoviewController,
+    controller: Option<Box<dyn WebviewController>>,
 }
 
 impl VersoWebviewHost {
     /// Create a new host for the given window handle. You are expected to call
     /// `bind_native_surface` soon after to attach the Verso/Servo renderer.
     pub fn new(window: WinitWindowHandle) -> Self {
-        Self { window }
+        Self {
+            window,
+            controller: None,
+        }
     }
 
     /// The window this host is bound to.
@@ -247,41 +263,100 @@ impl VersoWebviewHost {
     /// and any globally configured paths/resources (see crate-level helpers).
     pub fn bind_native_surface(
         &mut self,
-        _handles: NativeSurfaceHandles,
+        handles: NativeSurfaceHandles,
+        config: ControllerConfig,
     ) -> Result<(), WinitRuntimeError> {
-        // TODO(verso): Initialize and attach Verso controller using `_handles`.
+        // Select a controller backend based on feature flags and the provided config.
+        let mut controller: Box<dyn WebviewController>;
+        #[cfg(feature = "versoview-runtime")]
+        {
+            controller = match config.mode {
+                ControllerMode::InProcess => {
+                    Box::new(crate::in_process_controller::InProcessController::new())
+                }
+                ControllerMode::OutOfProcess => {
+                    Box::new(crate::ipc_controller::IpcController::new())
+                }
+            };
+        }
+        #[cfg(not(feature = "versoview-runtime"))]
+        {
+            controller = Box::new(MockWebviewController::default());
+        }
+        controller
+            .initialize(config)
+            .map_err(|_| WinitRuntimeError::Backend("controller initialize failed"))?;
+        controller
+            .bind_surface(handles)
+            .map_err(|_| WinitRuntimeError::Backend("controller bind failed"))?;
+        self.controller = Some(controller);
         Ok(())
     }
 
-    /// Load a URL or local resource. Placeholder for the Verso navigation API.
-    pub fn load(&mut self, _url: &str) -> Result<(), WinitRuntimeError> {
-        // TODO(verso): Forward to the controller.
-        Ok(())
+    /// Load a URL or local resource by forwarding to the controller.
+    pub fn load(&mut self, url: &str) -> Result<(), WinitRuntimeError> {
+        let ctrl = self
+            .controller
+            .as_mut()
+            .ok_or(WinitRuntimeError::NotInitialized("controller not bound"))?;
+        ctrl.load(url)
+            .map_err(|_| WinitRuntimeError::Backend("controller load failed"))
     }
 
-    /// Evaluate JavaScript in the page context. Placeholder for Verso scripting.
-    pub fn eval_script(&mut self, _source: &str) -> Result<(), WinitRuntimeError> {
-        // TODO(verso): Forward to the controller.
-        Ok(())
+    /// Evaluate JavaScript in the page context via the controller.
+    pub fn eval_script(&mut self, source: &str) -> Result<(), WinitRuntimeError> {
+        let ctrl = self
+            .controller
+            .as_mut()
+            .ok_or(WinitRuntimeError::NotInitialized("controller not bound"))?;
+        ctrl.eval_script(source)
+            .map_err(|_| WinitRuntimeError::Backend("controller eval_script failed"))
     }
 
-    /// Notify the host that the window was resized. Placeholder for viewport updates.
-    pub fn resize(&mut self, _new_size: PhysicalSize<u32>) -> Result<(), WinitRuntimeError> {
-        // TODO(verso): Forward to the controller and request redraw if needed.
-        Ok(())
+    /// Notify the controller that the window was resized.
+    pub fn resize(&mut self, new_size: PhysicalSize<u32>) -> Result<(), WinitRuntimeError> {
+        let ctrl = self
+            .controller
+            .as_mut()
+            .ok_or(WinitRuntimeError::NotInitialized("controller not bound"))?;
+        ctrl.resize(new_size)
+            .map_err(|_| WinitRuntimeError::Backend("controller resize failed"))
     }
 
-    /// Paint or present now if the controller uses explicit drawing hooks.
+    /// Paint or present now if supported by the controller.
     pub fn draw(&mut self) -> Result<(), WinitRuntimeError> {
-        // TODO(verso): Call into the compositor/presenter if needed.
-        Ok(())
+        let ctrl = self
+            .controller
+            .as_mut()
+            .ok_or(WinitRuntimeError::NotInitialized("controller not bound"))?;
+        ctrl.draw()
+            .map_err(|_| WinitRuntimeError::Backend("controller draw failed"))
+    }
+
+    /// Forward a single input event to the controller.
+    pub fn send_input(&mut self, event: InputEvent) -> Result<(), WinitRuntimeError> {
+        let ctrl = self
+            .controller
+            .as_mut()
+            .ok_or(WinitRuntimeError::NotInitialized("controller not bound"))?;
+        ctrl.send_input(event)
+            .map_err(|_| WinitRuntimeError::Backend("controller send_input failed"))
     }
 }
 
 /// Internal registration record for a single window.
-#[derive(Default)]
 struct WindowRecord<T> {
     subscribers: Vec<Box<dyn EventSubscriber<T>>>,
+    host: Option<VersoWebviewHost>,
+}
+
+impl<T> Default for WindowRecord<T> {
+    fn default() -> Self {
+        Self {
+            subscribers: Vec::new(),
+            host: None,
+        }
+    }
 }
 
 /// A thin runtime layer that owns (or integrates with) a `winit` event loop,
@@ -290,13 +365,21 @@ struct WindowRecord<T> {
 /// This struct is safe to share across threads for posting events and registering
 /// subscribers; the actual `winit::window::Window` objects are owned by the event-loop
 /// thread in the `App` handler.
-pub struct WinitRuntime<T = ()> {
+#[derive(Clone)]
+pub struct WinitRuntime<T: 'static = ()> {
     event_loop_proxy: Arc<Mutex<Option<EventLoopProxy<RuntimeEvent<T>>>>>,
     windows: Arc<Mutex<HashMap<WindowId, WindowRecord<T>>>>,
     on_user_event: Arc<Mutex<Option<Box<dyn FnMut(T)>>>>,
+    /// External user event channel (sender) for cross-thread injections.
+    external_user_tx: Arc<Mutex<Option<mpsc::Sender<T>>>>,
+    /// External user event channel (receiver) drained on the event-loop thread.
+    external_user_rx: Arc<Mutex<Option<mpsc::Receiver<T>>>>,
 }
 
-impl<T> Default for WinitRuntime<T> {
+impl<T> Default for WinitRuntime<T>
+where
+    T: 'static + Send,
+{
     fn default() -> Self {
         Self::new()
     }
@@ -312,6 +395,8 @@ where
             event_loop_proxy: Arc::new(Mutex::new(None)),
             windows: Arc::new(Mutex::new(HashMap::new())),
             on_user_event: Arc::new(Mutex::new(None)),
+            external_user_tx: Arc::new(Mutex::new(None)),
+            external_user_rx: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -363,20 +448,55 @@ where
         Ok(())
     }
 
-    /// Post an internal command to the event loop thread using the `EventLoopProxy`.
-    pub fn post_internal(&self, cmd: InternalCommand) -> Result<(), WinitRuntimeError> {
-        let proxy = self
-            .event_loop_proxy
-            .lock()
-            .unwrap()
-            .as_ref()
-            .cloned()
-            .ok_or(WinitRuntimeError::NotInitialized(
-                "event loop proxy not available",
-            ))?;
-        proxy
-            .send_event(RuntimeEvent::Internal(cmd))
-            .map_err(|_| WinitRuntimeError::Backend("failed to post event"))
+    /// Attach a VersoWebviewHost to a window so subscribers can forward events to the controller.
+    pub fn attach_host(
+        &self,
+        window: WinitWindowHandle,
+        host: VersoWebviewHost,
+    ) -> Result<(), WinitRuntimeError> {
+        let mut map = self.windows.lock().unwrap();
+        let record = map
+            .get_mut(&window.id)
+            .ok_or(WinitRuntimeError::UnknownWindow(window.id))?;
+        record.host = Some(host);
+        Ok(())
+    }
+
+    /// Attach a VersoWebviewHost and bridge controller events into user events.
+    ///
+    /// The provided `map` converts `ControllerEvent` into your runtime's user event type `T`,
+    /// which will be posted as a `RuntimeEvent::User(T)` to the event loop.
+    pub fn attach_host_with_events(
+        &self,
+        window: WinitWindowHandle,
+        mut host: VersoWebviewHost,
+        map: impl Fn(crate::controller::ControllerEvent) -> T + Send + 'static,
+    ) -> Result<(), WinitRuntimeError>
+    where
+        T: 'static + Send,
+    {
+        if let Some(ctrl) = host.controller.as_mut() {
+            let tx = self
+                .external_user_tx
+                .lock()
+                .unwrap()
+                .as_ref()
+                .cloned()
+                .ok_or(WinitRuntimeError::NotInitialized(
+                    "user event channel not available",
+                ))?;
+            let sink: crate::controller::ControllerEventSink = Box::new(move |evt| {
+                let user_evt = map(evt);
+                let _ = tx.send(user_evt);
+            });
+            let _ = ctrl.set_event_sink(sink);
+        }
+        let mut mapw = self.windows.lock().unwrap();
+        let record = mapw
+            .get_mut(&window.id)
+            .ok_or(WinitRuntimeError::UnknownWindow(window.id))?;
+        record.host = Some(host);
+        Ok(())
     }
 
     /// Post a user-defined event to the event loop thread.
@@ -395,10 +515,24 @@ where
             .map_err(|_| WinitRuntimeError::Backend("failed to post user event"))
     }
 
+    /// Request raw native surface handles for a given window via the event loop.
+    pub fn get_native_surface_handles(
+        &self,
+        window: WinitWindowHandle,
+    ) -> Result<NativeSurfaceHandles, WinitRuntimeError> {
+        let (tx, rx) = mpsc::channel::<NativeSurfaceHandles>();
+        self.post_internal(InternalCommand::GetNativeSurfaceHandles {
+            window_id: window.id(),
+            respond_to: tx,
+        })?;
+        rx.recv()
+            .map_err(|_| WinitRuntimeError::Backend("failed to receive native handles"))
+    }
+
     /// Run the event loop and dispatch events to registered subscribers.
     ///
     /// This blocks until the application exits.
-    pub fn run(mut self, on_user_event: impl FnMut(T) + 'static) -> Result<(), WinitRuntimeError> {
+    pub fn run(self, on_user_event: impl FnMut(T) + 'static) -> Result<(), WinitRuntimeError> {
         // Build the event loop
         let event_loop = EventLoop::<RuntimeEvent<T>>::with_user_event()
             .build()
@@ -414,6 +548,14 @@ where
             let mut cb = self.on_user_event.lock().unwrap();
             *cb = Some(Box::new(on_user_event));
         }
+        // Initialize external user event channel for cross-thread injections.
+        {
+            let (tx, rx) = mpsc::channel::<T>();
+            let mut extx = self.external_user_tx.lock().unwrap();
+            *extx = Some(tx);
+            let mut exrx = self.external_user_rx.lock().unwrap();
+            *exrx = Some(rx);
+        }
 
         // Wrap state into the App handler and run
         let mut app = App {
@@ -428,8 +570,29 @@ where
     }
 }
 
+impl<T> WinitRuntime<T>
+where
+    T: 'static + Send,
+{
+    /// Post an internal command to the event loop thread using the `EventLoopProxy`.
+    pub fn post_internal(&self, cmd: InternalCommand) -> Result<(), WinitRuntimeError> {
+        let proxy = self
+            .event_loop_proxy
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned()
+            .ok_or(WinitRuntimeError::NotInitialized(
+                "event loop proxy not available",
+            ))?;
+        proxy
+            .send_event(RuntimeEvent::Internal(cmd))
+            .map_err(|_| WinitRuntimeError::Backend("failed to post event"))
+    }
+}
+
 /// Internal application handler bridging winit and our runtime.
-struct App<T> {
+struct App<T: 'static> {
     runtime: WinitRuntime<T>,
     windows: HashMap<WindowId, Window>,
 }
@@ -448,13 +611,21 @@ where
             return Err(WinitRuntimeError::UnknownWindow(window.id));
         };
 
+        // Temporarily take the host out to obtain a mutable reference without borrowing conflicts.
+        let mut host_opt = record.host.take();
+
         let mut ctx = DispatchContext {
             runtime: &self.runtime,
+            host: host_opt.as_mut(),
         };
 
         for sub in record.subscribers.iter_mut() {
             f(sub.as_mut(), &mut ctx);
         }
+
+        // Put the host back.
+        record.host = host_opt;
+
         Ok(())
     }
 
@@ -487,12 +658,12 @@ where
             }
             InternalCommand::SetTitle(id, title) => {
                 if let Some(w) = self.windows.get(&id) {
-                    w.set_title(title);
+                    w.set_title(&title);
                 }
             }
             InternalCommand::SetCursorIcon(id, icon) => {
                 if let Some(w) = self.windows.get(&id) {
-                    w.set_cursor_icon(icon);
+                    w.set_cursor(icon);
                 }
             }
             InternalCommand::SetCursorVisible(id, visible) => {
@@ -520,6 +691,20 @@ where
                 // If there are no more windows, exit the loop.
                 if self.windows.is_empty() {
                     event_loop.exit();
+                }
+            }
+            InternalCommand::GetNativeSurfaceHandles {
+                window_id,
+                respond_to,
+            } => {
+                if let Some(w) = self.windows.get(&window_id) {
+                    if let Ok(wh) = w.window_handle() {
+                        let handles = NativeSurfaceHandles {
+                            window: wh.as_raw(),
+                            display: w.display_handle().ok().map(|d| d.as_raw()),
+                        };
+                        let _ = respond_to.send(handles);
+                    }
                 }
             }
         }
@@ -591,6 +776,7 @@ where
         // Broadcast device events to all subscribers of all windows
         let mut ctx = DispatchContext {
             runtime: &self.runtime,
+            host: None,
         };
         let mut map = self.runtime.windows.lock().unwrap();
         for record in map.values_mut() {
@@ -601,8 +787,132 @@ where
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // Called just before the event loop sleeps. This is a good point to request redraws
-        // if you have animations or need to drive a render loop.
+        // Drain external user event channel and dispatch to the user callback.
+        loop {
+            let next = {
+                let mut guard = self.runtime.external_user_rx.lock().unwrap();
+                if let Some(rx) = guard.as_mut() {
+                    rx.try_recv().ok()
+                } else {
+                    None
+                }
+            };
+            if let Some(ev) = next {
+                if let Some(cb) = self.runtime.on_user_event.lock().unwrap().as_mut() {
+                    cb(ev);
+                }
+            } else {
+                break;
+            }
+        }
+        // Additional redraw orchestration can be performed here as needed.
+    }
+}
+
+// =======================
+// Controller event subscriber
+// =======================
+
+/// A basic subscriber that forwards winit events to the controller
+/// via the VersoWebviewHost attached to this window.
+pub struct ControllerEventSubscriber {}
+
+impl ControllerEventSubscriber {
+    pub fn new(_window: WinitWindowHandle) -> Self {
+        Self {}
+    }
+}
+
+impl<T> EventSubscriber<T> for ControllerEventSubscriber
+where
+    T: Send + 'static,
+{
+    fn on_window_event(
+        &mut self,
+        _window: WinitWindowHandle,
+        event: &WindowEvent,
+        ctx: &mut DispatchContext<T>,
+    ) {
+        if let Some(host) = ctx.host_mut() {
+            match event {
+                WindowEvent::CursorMoved { position, .. } => {
+                    let _ = host.send_input(InputEvent::MouseMove {
+                        x: position.x,
+                        y: position.y,
+                    });
+                }
+                WindowEvent::MouseInput { state, button, .. } => {
+                    let btn = map_winit_mouse_button(*button);
+                    let pressed = matches!(state, ElementState::Pressed);
+                    let _ = host.send_input(InputEvent::MouseButton {
+                        button: btn,
+                        state: if pressed {
+                            ButtonState::Pressed
+                        } else {
+                            ButtonState::Released
+                        },
+                    });
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let (dx, dy, precise) = match delta {
+                        MouseScrollDelta::LineDelta(x, y) => (*x as f32, *y as f32, false),
+                        MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32, true),
+                    };
+                    let _ = host.send_input(InputEvent::Scroll {
+                        delta_x: dx,
+                        delta_y: dy,
+                        is_precise: precise,
+                    });
+                }
+                WindowEvent::KeyboardInput { event, .. } => {
+                    if let Some(name) = map_winit_key(&event.logical_key) {
+                        match event.state {
+                            ElementState::Pressed => {
+                                let _ = host.send_input(InputEvent::KeyDown { key: name });
+                            }
+                            ElementState::Released => {
+                                let _ = host.send_input(InputEvent::KeyUp { key: name });
+                            }
+                        }
+                    }
+                }
+                WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                    for ch in text.chars() {
+                        let _ = host.send_input(InputEvent::CharInput { ch });
+                    }
+                }
+                WindowEvent::Focused(focused) => {
+                    let _ = host.send_input(InputEvent::FocusChanged { focused: *focused });
+                }
+                WindowEvent::CursorEntered { .. } => {
+                    let _ = host.send_input(InputEvent::PointerEntered);
+                }
+                WindowEvent::CursorLeft { .. } => {
+                    let _ = host.send_input(InputEvent::PointerLeft);
+                }
+                WindowEvent::Resized(new_size) => {
+                    let _ = host.resize(*new_size);
+                }
+                WindowEvent::ScaleFactorChanged { .. } => {
+                    // Without a new size available here, trigger a redraw path.
+                    let _ = host.draw();
+                }
+                WindowEvent::ModifiersChanged(_mods) => {
+                    // Modifier changes can be tracked if the controller requires them.
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn on_redraw_requested(&mut self, _window: WinitWindowHandle, _ctx: &mut DispatchContext<T>) {
+        // No-op: drawing is handled in on_draw for explicit present.
+    }
+
+    fn on_draw(&mut self, _window: WinitWindowHandle, ctx: &mut DispatchContext<T>) {
+        if let Some(host) = ctx.host_mut() {
+            let _ = host.draw();
+        }
     }
 }
 
@@ -620,7 +930,7 @@ pub fn map_winit_mouse_button(button: winit::event::MouseButton) -> u8 {
         winit::event::MouseButton::Middle => 3,
         winit::event::MouseButton::Back => 4,
         winit::event::MouseButton::Forward => 5,
-        winit::event::MouseButton::Other(x) => (10 + (x % 245) as u8), // keep within u8
+        winit::event::MouseButton::Other(x) => 10 + (x % 245) as u8, // keep within u8
     }
 }
 

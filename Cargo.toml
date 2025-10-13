@@ -6,31 +6,32 @@ edition = "2024"
 [workspace]
 members = [
     "examples/winit_hello",
+    "versoview",
 ]
 
-
-
-
+[features]
+default = []
+versoview-runtime = [
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:bytes",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:bincode",
+]
+zero_copy = []
 
 [dependencies]
-
-winit = "0.29"
-raw-window-handle = "0.6"
-raw-display-handle = "0.6"
+winit = "0.30.12"
+raw-window-handle = "0.6.2"
 
 
-
-
-
-
-
-
-
-
-
-
-
-
+tokio = { version = "1.47.1", optional = true, features = ["rt-multi-thread", "macros", "sync", "time", "io-std", "io-util", "net", "process"] }
+tokio-util = { version = "0.7.16", optional = true, features = ["codec"] }
+bytes = { version = "1.10.1", optional = true }
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+serde_json = { version = "1.0.145", optional = true }
+bincode = { version = "2.0.1", optional = true, features = ["serde"] }
 
 [lints.clippy]
 needless_doctest_main = "allow"
