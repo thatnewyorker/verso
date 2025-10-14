@@ -43,6 +43,10 @@ pub struct ControllerConfig {
     pub mode: ControllerMode,
     /// Optional path to an external `versoview` binary (used in out-of-process mode).
     pub external_bin_path: Option<PathBuf>,
+    /// Optional path to a Unix domain socket for IPC transport selection (out-of-process mode).
+    /// When provided and supported by the platform, the IPC controller may prefer this transport
+    /// (e.g., for zero-copy handle passing) instead of stdio.
+    pub unix_socket_path: Option<PathBuf>,
     /// Optional resources directory (assets, preload scripts, etc.).
     pub resources_dir: Option<PathBuf>,
     /// Optional devtools port; use 0 to request a random available port.

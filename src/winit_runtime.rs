@@ -240,6 +240,8 @@ pub struct NativeSurfaceHandles {
 pub struct VersoWebviewHost {
     window: WinitWindowHandle,
     controller: Option<Box<dyn WebviewController>>,
+    #[cfg(all(unix, feature = "zero_copy", feature = "versoview-runtime"))]
+    ipc_controller_raw: Option<*mut crate::ipc_controller::IpcController>,
 }
 
 impl VersoWebviewHost {
@@ -249,6 +251,8 @@ impl VersoWebviewHost {
         Self {
             window,
             controller: None,
+            #[cfg(all(unix, feature = "zero_copy", feature = "versoview-runtime"))]
+            ipc_controller_raw: None,
         }
     }
 
@@ -275,7 +279,15 @@ impl VersoWebviewHost {
                     Box::new(crate::in_process_controller::InProcessController::new())
                 }
                 ControllerMode::OutOfProcess => {
-                    Box::new(crate::ipc_controller::IpcController::new())
+                    let boxed = Box::new(crate::ipc_controller::IpcController::new());
+                    #[cfg(all(unix, feature = "zero_copy"))]
+                    {
+                        // Stash a raw pointer for zero-copy demo getters.
+                        self.ipc_controller_raw = Some(Box::as_ref(&boxed)
+                            as *const crate::ipc_controller::IpcController
+                            as *mut _);
+                    }
+                    boxed
                 }
             };
         }
@@ -341,6 +353,27 @@ impl VersoWebviewHost {
             .ok_or(WinitRuntimeError::NotInitialized("controller not bound"))?;
         ctrl.send_input(event)
             .map_err(|_| WinitRuntimeError::Backend("controller send_input failed"))
+    }
+
+    #[cfg(all(unix, feature = "zero_copy", feature = "versoview-runtime"))]
+    /// Returns Some(true/false) if running with the IPC controller zero-copy demo,
+    /// or None when not available.
+    pub fn demo_last_frame_valid(&self) -> Option<bool> {
+        let ptr = self.ipc_controller_raw?;
+        // SAFETY: The raw pointer references the boxed controller stored in `self.controller`.
+        // It remains valid for the lifetime of the controller owned by this host.
+        let ctrl = unsafe { &*ptr };
+        Some(ctrl.last_frame_valid())
+    }
+
+    #[cfg(all(unix, feature = "zero_copy", feature = "versoview-runtime"))]
+    /// Takes ownership of the last verified frame bytes (if any).
+    /// Returns None when not available or already taken.
+    pub fn demo_take_last_frame_bytes(&mut self) -> Option<Vec<u8>> {
+        let ptr = self.ipc_controller_raw?;
+        // SAFETY: See above; we ensure exclusive &mut self to avoid aliasing mutable access.
+        let ctrl = unsafe { &mut *ptr };
+        ctrl.take_last_frame_bytes()
     }
 }
 

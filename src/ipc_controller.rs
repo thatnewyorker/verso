@@ -53,6 +53,8 @@ use crate::{verso_devtools_port, verso_path, verso_resource_directory};
 
 use crate::ipc_protocol as proto;
 use crate::ipc_transport::{IpcTransport, StdIoTransport};
+#[cfg(all(unix, feature = "zero_copy"))]
+use crate::transport_unix::UnixSocketTransport;
 
 /// Maximum time we wait for a request ack before treating it as a failure.
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -87,6 +89,12 @@ pub struct IpcController {
     draws_performed: usize,
     visible: bool,
     negotiated_caps: Option<proto::Capabilities>,
+    #[cfg(all(unix, feature = "zero_copy"))]
+    pending_handles: Arc<Mutex<HashMap<u64, Vec<crate::ipc_transport::OpaqueHandle>>>>,
+    #[cfg(all(unix, feature = "zero_copy"))]
+    last_frame_valid: Arc<AtomicBool>,
+    #[cfg(all(unix, feature = "zero_copy"))]
+    last_frame_bytes: Arc<Mutex<Option<Vec<u8>>>>,
 
     // Async event sink for forwarding server events
     event_sink: Arc<Mutex<Option<ControllerEventSink>>>,
@@ -116,6 +124,12 @@ impl Default for IpcController {
             draws_performed: 0,
             visible: true,
             negotiated_caps: None,
+            #[cfg(all(unix, feature = "zero_copy"))]
+            pending_handles: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(all(unix, feature = "zero_copy"))]
+            last_frame_valid: Arc::new(AtomicBool::new(false)),
+            #[cfg(all(unix, feature = "zero_copy"))]
+            last_frame_bytes: Arc::new(Mutex::new(None)),
             event_sink: Arc::new(Mutex::new(None)),
             rt: None,
             child: None,
@@ -127,6 +141,59 @@ impl Default for IpcController {
             })),
             next_id: Arc::new(AtomicU64::new(1)),
         }
+    }
+}
+
+#[cfg(all(unix, feature = "zero_copy"))]
+pub struct ReceivedHandle {
+    fd: std::os::unix::io::RawFd,
+}
+
+#[cfg(all(unix, feature = "zero_copy"))]
+impl ReceivedHandle {
+    pub fn from_opaque(handles: Vec<crate::ipc_transport::OpaqueHandle>) -> Option<Self> {
+        handles
+            .first()
+            .map(|h| ReceivedHandle { fd: (*h).0 as i32 })
+    }
+
+    /// Map the underlying FD into memory read-only and return an owned Mmap.
+    /// Safety: the server must ensure the file is at least `length` bytes long.
+    pub fn mmap_read(
+        &self,
+        length: usize,
+    ) -> Result<memmap2::Mmap, crate::controller::ControllerError> {
+        // Duplicate the fd so the temporary File we construct does not affect our owned fd.
+        let dup_fd = nix::unistd::dup(self.fd)
+            .map_err(|e| crate::controller::ControllerError::BackendMsg(format!("dup fd: {e}")))?;
+        // SAFETY: dup_fd is a freshly-duplicated, valid file descriptor we own.
+        let file = unsafe { <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(dup_fd) };
+        // SAFETY: mapping a file descriptor; kernel enforces page alignment internally.
+        let mmap = unsafe { memmap2::MmapOptions::new().len(length).map(&file) }
+            .map_err(|e| crate::controller::ControllerError::BackendMsg(format!("mmap: {e}")))?;
+        // Dropping `file` here closes only the duplicated fd; the original fd remains owned by this handle.
+        Ok(mmap)
+    }
+
+    /// Explicitly close the underlying FD early. Dropping the handle also closes it.
+    pub fn close(self) {
+        let fd = self.fd;
+        std::mem::forget(self);
+        let _ = nix::unistd::close(fd);
+    }
+
+    /// Transfer ownership of the raw fd to the caller. The handle will not close it on drop.
+    pub fn into_raw_fd(self) -> std::os::unix::io::RawFd {
+        let fd = self.fd;
+        std::mem::forget(self);
+        fd
+    }
+}
+
+#[cfg(all(unix, feature = "zero_copy"))]
+impl Drop for ReceivedHandle {
+    fn drop(&mut self) {
+        let _ = nix::unistd::close(self.fd);
     }
 }
 
@@ -247,11 +314,15 @@ impl IpcController {
         // Devtools: prefer explicit config, else global setting, else None
         let devtools_port = cfg.devtools_port.or_else(|| verso_devtools_port());
 
+        let mut init_scripts = cfg.init_scripts.clone();
+        if let Some(path) = cfg.unix_socket_path.clone() {
+            init_scripts.push(format!("__ipc_unix_socket_path={}", path.to_string_lossy()));
+        }
         proto::ControllerConfig {
             resources_dir,
             devtools_port,
             user_agent: cfg.user_agent.clone(),
-            init_scripts: cfg.init_scripts.clone(),
+            init_scripts,
             ipc_tuning: None,
         }
     }
@@ -341,21 +412,53 @@ impl IpcController {
     }
 
     fn start_transport_tasks(&mut self) -> Result<(), ControllerError> {
+        // Prepare transport: prefer Unix domain socket if configured and supported; else fallback to stdio.
+        #[cfg(all(unix, feature = "zero_copy"))]
+        let rt_handle = self.take_rt()?.handle().clone();
+
         let child = self
             .child
             .as_mut()
             .ok_or_else(|| ControllerError::InvalidState("child not spawned"))?;
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ControllerError::Backend("child stdout not available"))?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| ControllerError::Backend("child stdin not available"))?;
+        #[cfg(all(unix, feature = "zero_copy"))]
+        let mut transport: Box<dyn IpcTransport> = if let Some(path) = self
+            .config
+            .as_ref()
+            .and_then(|c| c.unix_socket_path.clone())
+        {
+            match rt_handle.block_on(UnixSocketTransport::connect(&path)) {
+                Ok(sock) => Box::new(sock),
+                Err(e) => {
+                    return Err(ControllerError::BackendMsg(format!(
+                        "unix socket connect failed: {e}"
+                    )));
+                }
+            }
+        } else {
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| ControllerError::Backend("child stdout not available"))?;
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| ControllerError::Backend("child stdin not available"))?;
+            Box::new(StdIoTransport::new(stdout, stdin))
+        };
 
-        let mut transport = StdIoTransport::new(stdout, stdin);
+        #[cfg(not(all(unix, feature = "zero_copy")))]
+        let mut transport: Box<dyn IpcTransport> = {
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| ControllerError::Backend("child stdout not available"))?;
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| ControllerError::Backend("child stdin not available"))?;
+            Box::new(StdIoTransport::new(stdout, stdin))
+        };
 
         // Channel to feed outbound payloads and close signal.
         let (tx, mut rx) = mpsc::channel::<BgCommand>(128);
@@ -364,19 +467,44 @@ impl IpcController {
         let shared = Arc::clone(&self.shared);
         let alive = Arc::clone(&self.alive);
         let event_sink = Arc::clone(&self.event_sink);
+        #[cfg(all(unix, feature = "zero_copy"))]
+        let pending_handles = Arc::clone(&self.pending_handles);
+        #[cfg(all(unix, feature = "zero_copy"))]
+        let last_frame_valid = Arc::clone(&self.last_frame_valid);
+        #[cfg(all(unix, feature = "zero_copy"))]
+        let last_frame_bytes = Arc::clone(&self.last_frame_bytes);
 
         // Background transport task: multiplex sending and receiving.
         let bg = self.take_rt()?.spawn(async move {
             loop {
                 select! {
                     // Receive next incoming frame
-                    inbound = transport.next_frame() => {
+                    inbound = async {
+                        #[cfg(all(unix, feature = "zero_copy"))]
+                        {
+                            if transport.supports_handle_passing() {
+                                match transport.next_frame_with_handles().await {
+                                    Ok((bytes, handles)) => Ok((bytes, Some(handles))),
+                                    Err(e) => Err(e),
+                                }
+                            } else {
+                                match transport.next_frame().await {
+                                    Ok(bytes) => Ok((bytes, None)),
+                                    Err(e) => Err(e),
+                                }
+                            }
+                        }
+                        #[cfg(not(all(unix, feature = "zero_copy")))]
+                        {
+                            match transport.next_frame().await {
+                                Ok(bytes) => Ok((bytes, None)),
+                                Err(e) => Err(e),
+                            }
+                        }
+                    } => {
                         match inbound {
-                            Ok(bytes) => {
+                            Ok((bytes, handles_opt)) => {
                                 // Deserialize envelope and route if Response
-                                // zero_copy (future): when feature and transport support handle-passing,
-                                // prefer transport.next_frame_with_handles() here and capture the returned handle vector.
-                                // For now we intentionally ignore handles and only decode the envelope bytes.
                                 match bincode::serde::decode_from_slice::<proto::Envelope, _>(&bytes, bincode::config::standard()) {
                                     Ok((env, _)) => {
                                         match env.message {
@@ -444,6 +572,117 @@ impl IpcController {
                                                             proto::FrameDescriptor::SharedMemoryImage { width, height, .. } => (width, height),
                                                             proto::FrameDescriptor::CompressedImage { width, height, .. } => (width, height),
                                                         };
+                                                        // Correlate any received FDs with HandleTokens in the descriptor (unix + zero_copy)
+                                                        #[cfg(all(unix, feature = "zero_copy"))]
+                                                        {
+                                                            if let Some(mut handles) = handles_opt {
+                                                                // Collect handle tokens in descriptor (order matters for naive mapping).
+                                                                let mut tokens: Vec<u64> = Vec::new();
+                                                                match &descriptor {
+                                                                    proto::FrameDescriptor::LinuxDmabuf { planes, fence, .. } => {
+                                                                        for p in planes {
+                                                                            tokens.push(p.fd.0);
+                                                                        }
+                                                                        if let Some(f) = fence {
+                                                                            tokens.push(f.0);
+                                                                        }
+                                                                    }
+                                                                    proto::FrameDescriptor::MacOsIoSurface { io_surface, .. } => {
+                                                                        tokens.push(io_surface.0);
+                                                                    }
+                                                                    proto::FrameDescriptor::WindowsDxgiSharedHandle { handle, .. } => {
+                                                                        tokens.push(handle.0);
+                                                                    }
+                                                                    proto::FrameDescriptor::SharedMemoryImage { shm, .. } => {
+                                                                        tokens.push(shm.0);
+                                                                    }
+                                                                    proto::FrameDescriptor::CompressedImage { payload, .. } => {
+                                                                        if let proto::PayloadLocator::Handle(h) = payload {
+                                                                            tokens.push(h.0);
+                                                                        }
+                                                                    }
+                                                                }
+                                                                // Store mapping: single token -> all handles, else zip in order.
+                                                                let mut map = pending_handles.lock().unwrap();
+                                                                if tokens.len() <= 1 {
+                                                                    if let Some(tok) = tokens.get(0) {
+                                                                        map.insert(*tok, handles);
+                                                                    }
+                                                                } else {
+                                                                    for (i, tok) in tokens.into_iter().enumerate() {
+                                                                        if i < handles.len() {
+                                                                            map.insert(tok, vec![handles[i]]);
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        // Auto-consume SharedMemoryImage for demo verification (unix + zero_copy).
+                                                        #[cfg(all(unix, feature = "zero_copy"))]
+                                                        {
+                                                            if let proto::FrameDescriptor::SharedMemoryImage { width, height, stride, format, shm, size } = descriptor.clone() {
+                                                                if matches!(format, proto::PixelFormat::Rgba8888) {
+                                                                    // Try to remove the handle mapping now to take ownership.
+                                                                    if let Some(handles) = {
+                                                                        let mut map = pending_handles.lock().unwrap();
+                                                                        map.remove(&shm.0)
+                                                                    } {
+                                                                        if let Some(fd) = handles.first() {
+                                                                            let len = size as usize;
+                                                                            // Map and verify in a blocking task.
+                                                                            if len > 0 {
+                                                                                let lfv = last_frame_valid.clone();
+                                                                                let lfb = last_frame_bytes.clone();
+                                                                                let fd_u64 = fd.0;
+                                                                                let _ = tokio::task::spawn_blocking(move || {
+                                                                                    // SAFETY: fd received from SCM_RIGHTS, valid for mapping.
+                                                                                    let fd_i32 = fd_u64 as i32;
+                                                                                    // Duplicate to avoid affecting original ownership during File::from_raw_fd.
+                                                                                    let dup = match nix::unistd::dup(fd_i32) {
+                                                                                        Ok(v) => v,
+                                                                                        Err(_) => {
+                                                                                            lfv.store(false, Ordering::SeqCst);
+                                                                                            let mut guard = lfb.lock().unwrap();
+                                                                                            *guard = None;
+                                                                                            return;
+                                                                                        }
+                                                                                    };
+                                                                                    let file = unsafe { <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(dup) };
+                                                                                    let mmap = unsafe { memmap2::MmapOptions::new().len(len).map(&file) };
+                                                                                    match mmap {
+                                                                                        Ok(m) => {
+                                                                                            let stride_usize = stride as usize;
+                                                                                            let mut ok = true;
+                                                                                            'outer: for y in 0..(height as usize) {
+                                                                                                for x in 0..(width as usize) {
+                                                                                                    let idx = y * stride_usize + x * 4;
+                                                                                                    if m[idx] != x as u8 || m[idx + 1] != y as u8 || m[idx + 2] != 0x80 || m[idx + 3] != 0xFF {
+                                                                                                        ok = false;
+                                                                                                        break 'outer;
+                                                                                                    }
+                                                                                                }
+                                                                                            }
+                                                                                            lfv.store(ok, Ordering::SeqCst);
+                                                                                            let mut guard = lfb.lock().unwrap();
+                                                                                            if ok {
+                                                                                                *guard = Some(m.to_vec());
+                                                                                            } else {
+                                                                                                *guard = None;
+                                                                                            }
+                                                                                        }
+                                                                                        Err(_) => {
+                                                                                            lfv.store(false, Ordering::SeqCst);
+                                                                                            let mut guard = lfb.lock().unwrap();
+                                                                                            *guard = None;
+                                                                                        }
+                                                                                    }
+                                                                                }).map(|_| ());
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                         if let Some(cb) = event_sink.lock().unwrap().as_ref() {
                                                             cb(ControllerEvent::FrameReady {
                                                                 width,
@@ -499,6 +738,32 @@ impl IpcController {
         Ok(())
     }
 
+    #[cfg(all(unix, feature = "zero_copy"))]
+    /// Consume a pending handle by its token, transferring ownership to the caller.
+    /// After this returns Ok, the token is removed from the internal map and cannot be taken again.
+    pub fn consume_handle(&mut self, token: u64) -> Result<ReceivedHandle, ControllerError> {
+        let handles = {
+            let mut map = self
+                .pending_handles
+                .lock()
+                .expect("pending_handles poisoned");
+            map.remove(&token)
+        }
+        .ok_or_else(|| ControllerError::InvalidState("handle token not found"))?;
+        ReceivedHandle::from_opaque(handles)
+            .ok_or_else(|| ControllerError::InvalidState("no handles attached for token"))
+    }
+
+    #[cfg(all(unix, feature = "zero_copy"))]
+    /// Return a snapshot of currently pending handle tokens (for debugging/tests).
+    pub fn debug_list_pending_handle_tokens(&self) -> Vec<u64> {
+        let map = self
+            .pending_handles
+            .lock()
+            .expect("pending_handles poisoned");
+        map.keys().copied().collect()
+    }
+
     fn do_handshake(&mut self) -> Result<(), ControllerError> {
         let cfg = self
             .config
@@ -531,6 +796,16 @@ impl IpcController {
         }
 
         Ok(())
+    }
+
+    #[cfg(all(unix, feature = "zero_copy"))]
+    pub fn last_frame_valid(&self) -> bool {
+        self.last_frame_valid.load(Ordering::SeqCst)
+    }
+
+    #[cfg(all(unix, feature = "zero_copy"))]
+    pub fn take_last_frame_bytes(&mut self) -> Option<Vec<u8>> {
+        self.last_frame_bytes.lock().unwrap().take()
     }
 }
 

@@ -19,7 +19,7 @@ versoview-runtime = [
     "dep:serde_json",
     "dep:bincode",
 ]
-zero_copy = []
+zero_copy = ["dep:nix", "dep:memmap2"]
 
 [dependencies]
 winit = "0.30.12"
@@ -32,6 +32,10 @@ bytes = { version = "1.10.1", optional = true }
 serde = { version = "1.0.228", features = ["derive"], optional = true }
 serde_json = { version = "1.0.145", optional = true }
 bincode = { version = "2.0.1", optional = true, features = ["serde"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", optional = true, features = ["socket", "uio", "memfd"] }
+memmap2 = { version = "0.9", optional = true }
 
 [lints.clippy]
 needless_doctest_main = "allow"

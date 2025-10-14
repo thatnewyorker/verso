@@ -2,16 +2,41 @@ use std::cmp;
 
 use bytes::Bytes;
 
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use tracing::{error, info, warn};
 use verso_standalone::ipc_protocol as proto;
 use verso_standalone::ipc_transport::IpcTransport;
+#[cfg(all(unix, feature = "zero_copy"))]
+use verso_standalone::ipc_transport::OpaqueHandle;
 use verso_standalone::ipc_transport::StdIoTransport;
+#[cfg(all(unix, feature = "zero_copy"))]
+use verso_standalone::transport_unix::UnixSocketTransport;
+
+enum TransportMode {
+    Stdio,
+    #[allow(dead_code)]
+    UnixSocket(String),
+}
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     init_tracing();
 
-    if let Err(e) = run_server().await {
+    let mut args = std::env::args().skip(1);
+    let mode = match args.next().as_deref() {
+        Some("--unix-socket") => {
+            if let Some(path) = args.next() {
+                TransportMode::UnixSocket(path)
+            } else {
+                warn!("--unix-socket flag requires a path argument; falling back to stdio.");
+                TransportMode::Stdio
+            }
+        }
+        _ => TransportMode::Stdio,
+    };
+
+    if let Err(e) = run_server(mode).await {
         error!("versoview server error: {e}");
         // Best effort flush before exit.
         // Note: stdout is managed by the transport; nothing else to flush here.
@@ -39,14 +64,37 @@ fn supports_version(range: proto::VersionRange, v: u16) -> bool {
     v >= range.min && v <= range.max
 }
 
-async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
-    // Framed stdio transport: read requests from stdin, write responses/events to stdout.
-    let mut transport = StdIoTransport::new(tokio::io::stdin(), tokio::io::stdout());
+async fn run_server(mode: TransportMode) -> Result<(), Box<dyn std::error::Error>> {
+    // Build transport based on CLI
+    #[allow(unused_mut)]
+    let mut transport: Box<dyn IpcTransport> = match mode {
+        TransportMode::Stdio => {
+            Box::new(StdIoTransport::new(tokio::io::stdin(), tokio::io::stdout()))
+        }
+        #[cfg(all(unix, feature = "zero_copy"))]
+        TransportMode::UnixSocket(path) => {
+            info!(
+                "versoview server starting (unix-socket transport: {})",
+                path
+            );
+            Box::new(UnixSocketTransport::connect(path).await?)
+        }
+        #[cfg(not(all(unix, feature = "zero_copy")))]
+        TransportMode::UnixSocket(path) => {
+            warn!("unix-socket mode requested but not supported in this build. Path: {path}");
+            Box::new(StdIoTransport::new(tokio::io::stdin(), tokio::io::stdout()))
+        }
+    };
 
     let server_name = "versoview";
     let mut next_id: u64 = 1;
 
-    info!("versoview server started (stdio transport)");
+    let mode_desc = if transport.supports_handle_passing() {
+        "transport with handle-passing"
+    } else {
+        "stdio transport"
+    };
+    info!("versoview server started ({mode_desc})");
 
     loop {
         match transport.next_frame().await {
@@ -64,7 +112,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
                 match env.message {
                     proto::Message::Request(req) => {
                         if let Err(e) = handle_request(
-                            &mut transport,
+                            &mut *transport,
                             &mut next_id,
                             server_name,
                             env.version,
@@ -98,7 +146,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn handle_request(
-    transport: &mut StdIoTransport<tokio::io::Stdin, tokio::io::Stdout>,
+    transport: &mut dyn IpcTransport,
     next_id: &mut u64,
     server_name: &str,
     peer_version: u16,
@@ -139,8 +187,8 @@ async fn handle_request(
             }
 
             let caps = proto::Capabilities {
-                fd_passing: false,
-                zero_copy_frames: false,
+                fd_passing: transport.supports_handle_passing(),
+                zero_copy_frames: transport.supports_handle_passing(),
                 compressed_frames: true,
                 supported_compressed: vec![proto::CompressedFormat::Png],
                 extra: vec![],
@@ -234,7 +282,7 @@ async fn handle_request(
 
         proto::Request::RequestDraw => {
             info!("RequestDraw");
-            // Acknowledge and emit a dummy event to simulate a frame path.
+            // Acknowledge first.
             send_response(
                 transport,
                 next_id,
@@ -243,14 +291,76 @@ async fn handle_request(
                 },
             )
             .await?;
-            let evt = proto::Event::ConsoleMessage {
-                level: proto::ConsoleLevel::Info,
-                message: "Draw requested".to_string(),
-                source: Some("versoview".to_string()),
-                line: None,
-                column: None,
-            };
-            send_event(transport, next_id, evt).await?;
+            // If handle passing is available, emit a demo FrameReady with a shared-memory handle.
+            #[cfg(all(unix, feature = "zero_copy"))]
+            if transport.supports_handle_passing() {
+                use nix::sys::memfd::{MemfdCreateFlag, memfd_create};
+                use std::ffi::CString;
+                use std::io::Write;
+                use std::os::unix::io::FromRawFd;
+
+                // Create an anonymous shared memory file via memfd.
+                let name = CString::new("versoview_frame").unwrap();
+                let fd = memfd_create(&name, MemfdCreateFlag::empty())?;
+
+                // SAFETY: we own the freshly created memfd `fd`.
+                let mut file =
+                    unsafe { <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(fd) };
+
+                // Deterministic RGBA pattern: 64x64 gradient.
+                let width: u32 = 64;
+                let height: u32 = 64;
+                let stride: u32 = width * 4;
+                let size: usize = (stride as usize) * (height as usize);
+                let mut bytes = vec![0u8; size];
+                for y in 0..height as usize {
+                    for x in 0..width as usize {
+                        let idx = y * (stride as usize) + x * 4;
+                        bytes[idx + 0] = x as u8; // R
+                        bytes[idx + 1] = y as u8; // G
+                        bytes[idx + 2] = 0x80; // B
+                        bytes[idx + 3] = 0xFF; // A
+                    }
+                }
+
+                // Ensure file is sized appropriately and write the payload.
+                file.set_len(size as u64)?;
+                file.write_all(&bytes)?;
+
+                // Choose a token decoupled from the raw fd (monotonic relative to message id).
+                let token = next_id.saturating_add(1);
+
+                let evt = proto::Event::FrameReady {
+                    frame_id: *next_id,
+                    descriptor: proto::FrameDescriptor::SharedMemoryImage {
+                        width,
+                        height,
+                        stride,
+                        format: proto::PixelFormat::Rgba8888,
+                        shm: proto::HandleToken(token),
+                        size: size as u64,
+                    },
+                };
+                // Attach the memfd and transfer ownership to the client; drop our local file afterwards.
+                let fd_send = file.as_raw_fd();
+                send_event_with_handles(
+                    transport,
+                    next_id,
+                    evt,
+                    vec![OpaqueHandle(fd_send as u64)],
+                )
+                .await?;
+            } else {
+                // Fallback console event.
+                let evt = proto::Event::ConsoleMessage {
+                    level: proto::ConsoleLevel::Info,
+                    message: "Draw requested (no zero-copy transport)".to_string(),
+                    source: Some("versoview".to_string()),
+                    line: None,
+                    column: None,
+                };
+                send_event(transport, next_id, evt).await?;
+            }
         }
 
         proto::Request::DrawNow => {
@@ -298,7 +408,7 @@ async fn handle_request(
 }
 
 async fn send_response(
-    transport: &mut StdIoTransport<tokio::io::Stdin, tokio::io::Stdout>,
+    transport: &mut dyn IpcTransport,
     next_id: &mut u64,
     resp: proto::Response,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -314,7 +424,7 @@ async fn send_response(
 }
 
 async fn send_event(
-    transport: &mut StdIoTransport<tokio::io::Stdin, tokio::io::Stdout>,
+    transport: &mut dyn IpcTransport,
     next_id: &mut u64,
     evt: proto::Event,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -326,6 +436,24 @@ async fn send_event(
     };
     let bytes = serialize(&env)?;
     transport.send_frame(bytes).await?;
+    Ok(())
+}
+
+#[cfg(all(unix, feature = "zero_copy"))]
+async fn send_event_with_handles(
+    transport: &mut dyn IpcTransport,
+    next_id: &mut u64,
+    evt: proto::Event,
+    handles: Vec<OpaqueHandle>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = proto::Envelope {
+        version: proto::PROTOCOL_VERSION,
+        id: take_id(next_id),
+        flags: 0,
+        message: proto::Message::Event(evt),
+    };
+    let bytes = serialize(&env)?;
+    transport.send_frame_with_handles(bytes, handles).await?;
     Ok(())
 }
 
