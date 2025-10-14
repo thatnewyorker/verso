@@ -489,7 +489,7 @@ impl IpcController {
                                 }
                             } else {
                                 match transport.next_frame().await {
-                                    Ok(bytes) => Ok((bytes, None)),
+                                    Ok(bytes) => Ok((bytes, None::<Vec<crate::ipc_transport::OpaqueHandle>>)),
                                     Err(e) => Err(e),
                                 }
                             }
@@ -497,13 +497,15 @@ impl IpcController {
                         #[cfg(not(all(unix, feature = "zero_copy")))]
                         {
                             match transport.next_frame().await {
-                                Ok(bytes) => Ok((bytes, None)),
+                                Ok(bytes) => Ok((bytes, None::<Vec<()>>)),
                                 Err(e) => Err(e),
                             }
                         }
                     } => {
                         match inbound {
                             Ok((bytes, handles_opt)) => {
+                                #[cfg(not(all(unix, feature = "zero_copy")))]
+                                let _ = &handles_opt;
                                 // Deserialize envelope and route if Response
                                 match bincode::serde::decode_from_slice::<proto::Envelope, _>(&bytes, bincode::config::standard()) {
                                     Ok((env, _)) => {

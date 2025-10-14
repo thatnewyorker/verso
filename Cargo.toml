@@ -34,8 +34,8 @@ serde_json = { version = "1.0.145", optional = true }
 bincode = { version = "2.0.1", optional = true, features = ["serde"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.28", optional = true, features = ["socket", "uio", "memfd"] }
-memmap2 = { version = "0.9", optional = true }
+nix = { version = "0.30.1", optional = true, features = ["socket", "uio"] }
+memmap2 = { version = "0.9.8", optional = true }
 
 [lints.clippy]
 needless_doctest_main = "allow"

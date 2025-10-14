@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [features]
 default = []
+servo-engine = []
 zero_copy = ["verso-standalone/zero_copy", "dep:nix", "dep:memmap2"]
 
 [dependencies]
@@ -30,8 +31,8 @@ bincode = { version = "2.0.1", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.28", optional = true, features = ["socket", "uio", "memfd"] }
-memmap2 = { version = "0.9", optional = true }
+nix = { version = "0.30.1", optional = true, features = ["socket", "uio"] }
+memmap2 = { version = "0.9.8", optional = true }
 
 [lints.clippy]
 needless_doctest_main = "allow"

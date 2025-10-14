@@ -2,14 +2,17 @@ use std::cmp;
 
 use bytes::Bytes;
 
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 use tracing::{error, info, warn};
 use verso_standalone::ipc_protocol as proto;
 use verso_standalone::ipc_transport::IpcTransport;
 #[cfg(all(unix, feature = "zero_copy"))]
 use verso_standalone::ipc_transport::OpaqueHandle;
 use verso_standalone::ipc_transport::StdIoTransport;
+
+mod engine;
+mod servo_engine;
+use crate::engine::{DemoEngine, Engine, EngineFrame, EngineInit};
+use crate::servo_engine::ServoEngine;
 #[cfg(all(unix, feature = "zero_copy"))]
 use verso_standalone::transport_unix::UnixSocketTransport;
 
@@ -87,6 +90,12 @@ async fn run_server(mode: TransportMode) -> Result<(), Box<dyn std::error::Error
     };
 
     let server_name = "versoview";
+    let engine_choice = std::env::var("VERSOVIEW_ENGINE").unwrap_or_else(|_| "servo".to_string());
+    let mut engine: Box<dyn Engine> = if engine_choice.eq_ignore_ascii_case("demo") {
+        Box::new(DemoEngine::new())
+    } else {
+        Box::new(ServoEngine::new())
+    };
     let mut next_id: u64 = 1;
 
     let mode_desc = if transport.supports_handle_passing() {
@@ -113,6 +122,7 @@ async fn run_server(mode: TransportMode) -> Result<(), Box<dyn std::error::Error
                     proto::Message::Request(req) => {
                         if let Err(e) = handle_request(
                             &mut *transport,
+                            engine.as_mut(),
                             &mut next_id,
                             server_name,
                             env.version,
@@ -147,6 +157,7 @@ async fn run_server(mode: TransportMode) -> Result<(), Box<dyn std::error::Error
 
 async fn handle_request(
     transport: &mut dyn IpcTransport,
+    engine: &mut dyn Engine,
     next_id: &mut u64,
     server_name: &str,
     peer_version: u16,
@@ -186,11 +197,26 @@ async fn handle_request(
                 info!("devtools_port requested: {port}");
             }
 
+            // Initialize the engine and intersect capabilities with the transport support.
+            let prefer_zero_copy = transport.supports_handle_passing();
+            let eng_caps = engine
+                .init(EngineInit {
+                    resources_dir: config
+                        .resources_dir
+                        .as_ref()
+                        .map(|p| std::path::PathBuf::from(&p.0)),
+                    devtools_port: config.devtools_port,
+                    user_agent: config.user_agent.clone(),
+                    init_scripts: config.init_scripts.clone(),
+                    prefer_zero_copy,
+                })
+                .unwrap_or_default();
+
             let caps = proto::Capabilities {
-                fd_passing: transport.supports_handle_passing(),
-                zero_copy_frames: transport.supports_handle_passing(),
-                compressed_frames: true,
-                supported_compressed: vec![proto::CompressedFormat::Png],
+                fd_passing: prefer_zero_copy && eng_caps.fd_passing,
+                zero_copy_frames: prefer_zero_copy && eng_caps.zero_copy_frames,
+                compressed_frames: eng_caps.compressed_frames,
+                supported_compressed: eng_caps.supported_compressed.clone(),
                 extra: vec![],
             };
 
@@ -205,6 +231,7 @@ async fn handle_request(
 
         proto::Request::BindSurface { surface } => {
             info!("BindSurface: {:?}", surface);
+            let _ = engine.bind_surface(&surface);
             send_response(
                 transport,
                 next_id,
@@ -217,6 +244,7 @@ async fn handle_request(
 
         proto::Request::Load { url } => {
             info!("Load: {url}");
+            let _ = engine.load(&url);
             send_response(
                 transport,
                 next_id,
@@ -249,6 +277,7 @@ async fn handle_request(
                 source.chars().count(),
                 request_id
             );
+            let _ = engine.eval_script(&source);
             send_response(
                 transport,
                 next_id,
@@ -270,6 +299,7 @@ async fn handle_request(
 
         proto::Request::Resize { width, height } => {
             info!("Resize: {}x{}", width, height);
+            let _ = engine.resize(width, height);
             send_response(
                 transport,
                 next_id,
@@ -291,70 +321,149 @@ async fn handle_request(
                 },
             )
             .await?;
-            // If handle passing is available, emit a demo FrameReady with a shared-memory handle.
-            #[cfg(all(unix, feature = "zero_copy"))]
-            if transport.supports_handle_passing() {
-                use nix::sys::memfd::{MemfdCreateFlag, memfd_create};
-                use std::ffi::CString;
-                use std::io::Write;
-                use std::os::unix::io::FromRawFd;
-
-                // Create an anonymous shared memory file via memfd.
-                let name = CString::new("versoview_frame").unwrap();
-                let fd = memfd_create(&name, MemfdCreateFlag::empty())?;
-
-                // SAFETY: we own the freshly created memfd `fd`.
-                let mut file =
-                    unsafe { <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(fd) };
-
-                // Deterministic RGBA pattern: 64x64 gradient.
-                let width: u32 = 64;
-                let height: u32 = 64;
-                let stride: u32 = width * 4;
-                let size: usize = (stride as usize) * (height as usize);
-                let mut bytes = vec![0u8; size];
-                for y in 0..height as usize {
-                    for x in 0..width as usize {
-                        let idx = y * (stride as usize) + x * 4;
-                        bytes[idx + 0] = x as u8; // R
-                        bytes[idx + 1] = y as u8; // G
-                        bytes[idx + 2] = 0x80; // B
-                        bytes[idx + 3] = 0xFF; // A
-                    }
-                }
-
-                // Ensure file is sized appropriately and write the payload.
-                file.set_len(size as u64)?;
-                file.write_all(&bytes)?;
-
-                // Choose a token decoupled from the raw fd (monotonic relative to message id).
+            // Ask the engine for a frame and map it to a protocol descriptor.
+            if let Ok(Some(frame)) = engine.request_draw() {
+                // Choose a token for any out-of-band handle attachments.
                 let token = next_id.saturating_add(1);
-
-                let evt = proto::Event::FrameReady {
-                    frame_id: *next_id,
-                    descriptor: proto::FrameDescriptor::SharedMemoryImage {
+                // Map EngineFrame -> (FrameDescriptor, optional attached handles)
+                #[allow(unused_mut)]
+                #[cfg(all(unix, feature = "zero_copy"))]
+                let mut handles: Vec<OpaqueHandle> = Vec::new();
+                #[cfg(not(all(unix, feature = "zero_copy")))]
+                let mut handles: Vec<()> = Vec::new();
+                let descriptor = match frame {
+                    EngineFrame::SharedMemoryInline {
                         width,
                         height,
                         stride,
-                        format: proto::PixelFormat::Rgba8888,
-                        shm: proto::HandleToken(token),
-                        size: size as u64,
+                        format,
+                        bytes,
+                    } => {
+                        // Use compressed fallback path with inline payload for portability.
+                        proto::FrameDescriptor::CompressedImage {
+                            width,
+                            height,
+                            format: proto::CompressedFormat::Png,
+                            payload: proto::PayloadLocator::Inline(bytes),
+                        }
+                    }
+                    #[cfg(all(unix, feature = "zero_copy"))]
+                    EngineFrame::SharedMemoryHandle {
+                        width,
+                        height,
+                        stride,
+                        format,
+                        fd,
+                        size,
+                    } => {
+                        use std::os::unix::io::IntoRawFd;
+                        let raw = fd.into_raw_fd() as u64;
+                        handles.push(OpaqueHandle(raw));
+                        proto::FrameDescriptor::SharedMemoryImage {
+                            width,
+                            height,
+                            stride,
+                            format,
+                            shm: proto::HandleToken(token),
+                            size,
+                        }
+                    }
+                    #[cfg(all(unix, feature = "zero_copy"))]
+                    EngineFrame::LinuxDmabuf {
+                        width,
+                        height,
+                        fourcc,
+                        modifier,
+                        planes,
+                        fence,
+                    } => {
+                        use std::os::unix::io::IntoRawFd;
+                        for p in &planes {
+                            handles.push(OpaqueHandle(p.fd.as_raw_fd() as u64));
+                        }
+                        if let Some(f) = fence.as_ref() {
+                            handles.push(OpaqueHandle(f.as_raw_fd() as u64));
+                        }
+                        let planes_proto = planes
+                            .iter()
+                            .map(|p| proto::DmabufPlane {
+                                fd: proto::HandleToken(token),
+                                offset: p.offset,
+                                stride: p.stride,
+                                plane_index: p.plane_index,
+                            })
+                            .collect();
+                        proto::FrameDescriptor::LinuxDmabuf {
+                            width,
+                            height,
+                            fourcc,
+                            modifier,
+                            planes: planes_proto,
+                            fence: Some(proto::HandleToken(token)),
+                        }
+                    }
+                    #[cfg(target_os = "macos")]
+                    EngineFrame::MacOsIoSurface {
+                        width,
+                        height,
+                        pixel_format,
+                        io_surface_id,
+                    } => proto::FrameDescriptor::MacOsIoSurface {
+                        width,
+                        height,
+                        pixel_format,
+                        io_surface: proto::HandleToken(token),
+                    },
+                    #[cfg(target_os = "windows")]
+                    EngineFrame::WindowsDxgiSharedHandle {
+                        width,
+                        height,
+                        dxgi_format,
+                        handle_value,
+                    } => {
+                        handles.push(OpaqueHandle(handle_value));
+                        proto::FrameDescriptor::WindowsDxgiSharedHandle {
+                            width,
+                            height,
+                            dxgi_format,
+                            handle: proto::HandleToken(token),
+                        }
+                    }
+                    EngineFrame::CompressedImage {
+                        width,
+                        height,
+                        format,
+                        data,
+                    } => proto::FrameDescriptor::CompressedImage {
+                        width,
+                        height,
+                        format,
+                        payload: proto::PayloadLocator::Inline(data),
                     },
                 };
-                // Attach the memfd and transfer ownership to the client; drop our local file afterwards.
-                let fd_send = file.as_raw_fd();
-                send_event_with_handles(
-                    transport,
-                    next_id,
-                    evt,
-                    vec![OpaqueHandle(fd_send as u64)],
-                )
-                .await?;
+                let evt = proto::Event::FrameReady {
+                    frame_id: *next_id,
+                    descriptor,
+                };
+                // Send with or without handles depending on platform/feature.
+                #[cfg(all(unix, feature = "zero_copy"))]
+                {
+                    if transport.supports_handle_passing() && !handles.is_empty() {
+                        send_event_with_handles(transport, next_id, evt, handles).await?;
+                    } else {
+                        send_event(transport, next_id, evt).await?;
+                    }
+                }
+                #[cfg(not(all(unix, feature = "zero_copy")))]
+                {
+                    let _ = handles;
+                    send_event(transport, next_id, evt).await?;
+                }
             } else {
                 // Fallback console event.
                 let evt = proto::Event::ConsoleMessage {
                     level: proto::ConsoleLevel::Info,
-                    message: "Draw requested (no zero-copy transport)".to_string(),
+                    message: "Draw requested (no frame produced)".to_string(),
                     source: Some("versoview".to_string()),
                     line: None,
                     column: None,
@@ -373,10 +482,143 @@ async fn handle_request(
                 },
             )
             .await?;
+            if let Ok(Some(frame)) = engine.draw_now() {
+                let token = next_id.saturating_add(1);
+                #[allow(unused_mut)]
+                #[cfg(all(unix, feature = "zero_copy"))]
+                let mut handles: Vec<OpaqueHandle> = Vec::new();
+                #[cfg(not(all(unix, feature = "zero_copy")))]
+                let mut handles: Vec<()> = Vec::new();
+                let descriptor = match frame {
+                    EngineFrame::SharedMemoryInline {
+                        width,
+                        height,
+                        stride,
+                        format,
+                        bytes,
+                    } => proto::FrameDescriptor::CompressedImage {
+                        width,
+                        height,
+                        format: proto::CompressedFormat::Png,
+                        payload: proto::PayloadLocator::Inline(bytes),
+                    },
+                    #[cfg(all(unix, feature = "zero_copy"))]
+                    EngineFrame::SharedMemoryHandle {
+                        width,
+                        height,
+                        stride,
+                        format,
+                        fd,
+                        size,
+                    } => {
+                        use std::os::unix::io::IntoRawFd;
+                        let raw = fd.into_raw_fd() as u64;
+                        handles.push(OpaqueHandle(raw));
+                        proto::FrameDescriptor::SharedMemoryImage {
+                            width,
+                            height,
+                            stride,
+                            format,
+                            shm: proto::HandleToken(token),
+                            size,
+                        }
+                    }
+                    #[cfg(all(unix, feature = "zero_copy"))]
+                    EngineFrame::LinuxDmabuf {
+                        width,
+                        height,
+                        fourcc,
+                        modifier,
+                        planes,
+                        fence,
+                    } => {
+                        use std::os::unix::io::AsRawFd;
+                        for p in &planes {
+                            handles.push(OpaqueHandle(p.fd.as_raw_fd() as u64));
+                        }
+                        if let Some(f) = fence.as_ref() {
+                            handles.push(OpaqueHandle(f.as_raw_fd() as u64));
+                        }
+                        let planes_proto = planes
+                            .iter()
+                            .map(|p| proto::DmabufPlane {
+                                fd: proto::HandleToken(token),
+                                offset: p.offset,
+                                stride: p.stride,
+                                plane_index: p.plane_index,
+                            })
+                            .collect();
+                        proto::FrameDescriptor::LinuxDmabuf {
+                            width,
+                            height,
+                            fourcc,
+                            modifier,
+                            planes: planes_proto,
+                            fence: Some(proto::HandleToken(token)),
+                        }
+                    }
+                    #[cfg(target_os = "macos")]
+                    EngineFrame::MacOsIoSurface {
+                        width,
+                        height,
+                        pixel_format,
+                        io_surface_id: _,
+                    } => proto::FrameDescriptor::MacOsIoSurface {
+                        width,
+                        height,
+                        pixel_format,
+                        io_surface: proto::HandleToken(token),
+                    },
+                    #[cfg(target_os = "windows")]
+                    EngineFrame::WindowsDxgiSharedHandle {
+                        width,
+                        height,
+                        dxgi_format,
+                        handle_value,
+                    } => {
+                        handles.push(OpaqueHandle(handle_value));
+                        proto::FrameDescriptor::WindowsDxgiSharedHandle {
+                            width,
+                            height,
+                            dxgi_format,
+                            handle: proto::HandleToken(token),
+                        }
+                    }
+                    EngineFrame::CompressedImage {
+                        width,
+                        height,
+                        format,
+                        data,
+                    } => proto::FrameDescriptor::CompressedImage {
+                        width,
+                        height,
+                        format,
+                        payload: proto::PayloadLocator::Inline(data),
+                    },
+                };
+                let evt = proto::Event::FrameReady {
+                    frame_id: *next_id,
+                    descriptor,
+                };
+                #[cfg(all(unix, feature = "zero_copy"))]
+                {
+                    if transport.supports_handle_passing() && !handles.is_empty() {
+                        send_event_with_handles(transport, next_id, evt, handles).await?;
+                    } else {
+                        send_event(transport, next_id, evt).await?;
+                    }
+                }
+                #[cfg(not(all(unix, feature = "zero_copy")))]
+                {
+                    let _ = handles;
+                    send_event(transport, next_id, evt).await?;
+                }
+            }
         }
 
         proto::Request::InputEvent { events } => {
             info!("InputEvent: batch size={}", events.len());
+            let _ = engine.input_events(&events);
             send_response(
                 transport,
                 next_id,
