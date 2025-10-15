@@ -1,0 +1,22 @@
+[package]
+name = "tray_quit"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Example app demonstrating a minimal system tray with a Quit menu using Verso's tray_and_notify crate."
+
+[[bin]]
+name = "tray_quit"
+path = "src/main.rs"
+
+[dependencies]
+# Minimal dependency: public API is available without enabling platform backends.
+# Platform-specific backends can be enabled by adding features like:
+#   features = ["tray"]            # enables tray API (with per-platform subfeatures)
+#   features = ["notifications"]   # enables notification API
+# For Linux tray backend, ensure the workspace enables `tray-linux` as needed.
+tray_and_notify = { path = "../../tools/tray_and_notify" }
+
+[lints.clippy]
+needless_doctest_main = "allow"

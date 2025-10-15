@@ -1,0 +1,31 @@
+[package]
+name = "tauri_compat_ipc"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Optional Tauri-compatible IPC adapter for Verso: invoke/command protocol, event bus, and channel adapter."
+
+[lib]
+name = "tauri_compat_ipc"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[features]
+default = []
+# Enable tracing instrumentation points in the adapter.
+tracing = ["dep:tracing"]
+# Opt-in async handler support; may offload to a Tokio runtime.
+async-handlers = ["dep:tokio"]
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+thiserror = "1.0.64"
+# Optional: consumers can enable if binary encoding is desired.
+bincode = { version = "2.0.1", optional = true, features = ["serde"] }
+tracing = { version = "0.1", optional = true }
+tokio = { version = "1.47.1", optional = true, features = ["rt-multi-thread", "macros"] }
+
+[lints.clippy]
+needless_doctest_main = "allow"

@@ -37,6 +37,8 @@ use std::{
 };
 
 mod controller;
+#[cfg(feature = "window_manager")]
+pub mod window_manager_glue;
 mod winit_runtime;
 
 #[cfg(feature = "versoview-runtime")]

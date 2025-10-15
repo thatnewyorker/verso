@@ -38,3 +38,81 @@ jobs:
 
       - name: Build
         run: cargo build --package helloworld
+
+  packaging:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Detect Servo source
+        id: detect_servo
+        shell: bash
+        run: |
+          if [ -d "${{ github.workspace }}/servo" ]; then
+            echo "found=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=0" >> "$GITHUB_OUTPUT"
+            echo "Servo source not found; skipping packaging steps."
+          fi
+
+      - name: Package (zip)
+        if: steps.detect_servo.outputs.found == '1'
+        shell: bash
+        run: |
+          cargo run -p servo_prep -- \
+            --servo-src "${{ github.workspace }}/servo" \
+            --profile release \
+            --package zip \
+            --out-dir ./dist
+
+      - name: Upload zip artifact
+        if: steps.detect_servo.outputs.found == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: verso-${{ matrix.os }}
+          path: dist/*.zip
+
+      - name: AppImage (Linux only)
+        if: steps.detect_servo.outputs.found == '1' && matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          if command -v appimagetool >/dev/null 2>&1; then
+            cargo run -p servo_prep -- \
+              --servo-src "${{ github.workspace }}/servo" \
+              --profile release \
+              --package appimage \
+              --out-dir ./dist
+          else
+            echo "appimagetool not installed; skipping AppImage"
+          fi
+
+      - name: DMG (macOS only)
+        if: steps.detect_servo.outputs.found == '1' && matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          cargo run -p servo_prep -- \
+            --servo-src "${{ github.workspace }}/servo" \
+            --profile release \
+            --package dmg \
+            --out-dir ./dist
+
+      - name: MSI (Windows only)
+        if: steps.detect_servo.outputs.found == '1' && matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          if ((Get-Command candle.exe -ErrorAction SilentlyContinue) -and (Get-Command light.exe -ErrorAction SilentlyContinue)) {
+            cargo run -p servo_prep -- `
+              --servo-src "${{ github.workspace }}\servo" `
+              --profile release `
+              --package msi `
+              --out-dir .\dist
+          } else {
+            Write-Host "WiX (candle.exe/light.exe) not installed; skipping MSI"
+          }

@@ -1,0 +1,32 @@
+[package]
+name = "window_manager"
+version = "0.1.0"
+edition = "2024"
+description = "Lightweight, ergonomic window + webview builder and lifecycle API for Verso, inspired by Tauri but dependency-light."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[features]
+default = []
+tracing = ["dep:tracing"]
+# Enable global singletons (e.g., registries) behind a feature to keep defaults lean.
+once_cell = ["dep:once_cell"]
+
+[dependencies]
+# Windowing/runtime foundation.
+winit = "0.30.12"
+
+# Config, builder options, and event payloads may serialize/deserialize.
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+
+# Optional utilities
+once_cell = { version = "1.19.0", optional = true }
+tracing = { version = "0.1", optional = true }
+
+[lints.clippy]
+needless_doctest_main = "allow"

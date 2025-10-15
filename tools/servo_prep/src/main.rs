@@ -6,10 +6,15 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{ArgAction, Parser, ValueEnum};
+use hex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use walkdir::WalkDir;
 use which::which;
+use zip::write::FileOptions;
 
 #[derive(Debug, Clone, ValueEnum)]
 enum BuildProfile {
@@ -30,6 +35,14 @@ impl std::fmt::Display for BuildProfile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_dir())
     }
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum PackageKind {
+    Zip,
+    AppImage,
+    Dmg,
+    Msi,
 }
 
 #[derive(Debug, Parser)]
@@ -89,6 +102,18 @@ struct Args {
     /// If a directory is provided, the binary filename will be appended.
     #[arg(long)]
     copy_to: Option<PathBuf>,
+
+    /// Optional packaging format to produce (zip, appimage, dmg, msi).
+    #[arg(long, value_enum)]
+    package: Option<PackageKind>,
+
+    /// One or more resource paths to include alongside the binary in the package.
+    #[arg(long, value_name = "PATH", num_args = 1..)]
+    bundle_resources: Vec<PathBuf>,
+
+    /// Output directory for packaged artifacts (defaults to <workspace>/dist).
+    #[arg(long)]
+    out_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -318,6 +343,150 @@ fn main() -> Result<()> {
             let mut perm = fs::metadata(&dest_path)?.permissions();
             perm.set_mode(0o755);
             fs::set_permissions(&dest_path, perm)?;
+        }
+    }
+
+    // Optional packaging step
+    if let Some(kind) = args.package.clone() {
+        let out_dir = args.out_dir.clone().unwrap_or_else(|| ws_root.join("dist"));
+        fs::create_dir_all(&out_dir)
+            .with_context(|| format!("create dir {}", out_dir.display()))?;
+        match kind {
+            PackageKind::Zip => {
+                // Stage files in a temporary directory
+                let staging = TempDir::new().context("create staging dir")?;
+                let stage_root = staging.path();
+
+                // Copy binary into staging root
+                let stage_bin = stage_root.join(&dest_bin_name);
+                fs::copy(&dest_bin, &stage_bin).with_context(|| {
+                    format!(
+                        "stage bin {} -> {}",
+                        dest_bin.display(),
+                        stage_bin.display()
+                    )
+                })?;
+
+                // Copy user-provided resources into staging (files or directories)
+                for r in &args.bundle_resources {
+                    let src = if r.is_absolute() {
+                        r.clone()
+                    } else {
+                        ws_root.join(r)
+                    };
+                    if src.is_file() {
+                        let target = stage_root.join(src.file_name().unwrap());
+                        if let Some(parent) = target.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+                        fs::copy(&src, &target).with_context(|| {
+                            format!("stage resource {} -> {}", src.display(), target.display())
+                        })?;
+                    } else if src.is_dir() {
+                        let base = src
+                            .file_name()
+                            .map(|s| s.to_owned())
+                            .unwrap_or_else(|| OsStr::new("res").to_owned());
+                        for entry in WalkDir::new(&src)
+                            .into_iter()
+                            .filter_map(Result::ok)
+                            .filter(|e| e.file_type().is_file())
+                        {
+                            let rel = entry.path().strip_prefix(&src).unwrap();
+                            let target = stage_root.join(&base).join(rel);
+                            if let Some(parent) = target.parent() {
+                                fs::create_dir_all(parent)?;
+                            }
+                            fs::copy(entry.path(), &target).with_context(|| {
+                                format!(
+                                    "stage resource {} -> {}",
+                                    entry.path().display(),
+                                    target.display()
+                                )
+                            })?;
+                        }
+                    }
+                }
+
+                // Build metadata.json with file checksums (SHA-256) for staged contents
+                let mut checksums = serde_json::Map::new();
+                for entry in WalkDir::new(&stage_root)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .filter(|e| e.file_type().is_file())
+                {
+                    let rel = entry
+                        .path()
+                        .strip_prefix(&stage_root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string();
+                    let mut f = fs::File::open(entry.path())?;
+                    use std::io::Read;
+                    let mut hasher = Sha256::new();
+                    let _ = std::io::copy(&mut f, &mut hasher)?;
+                    let digest = hasher.finalize();
+                    checksums.insert(rel, serde_json::Value::String(hex::encode(digest)));
+                }
+                let metadata_json = serde_json::json!({
+                    "servo_commit": meta.servo_commit,
+                    "build_profile": meta.build_profile,
+                    "enabled_features": meta.enabled_features,
+                    "timestamp": meta.timestamp,
+                    "target_triple": meta.target_triple,
+                    "rust_toolchain": meta.rust_toolchain,
+                    "binary_name": meta.binary_name,
+                    "checksums": checksums,
+                });
+                fs::write(
+                    stage_root.join("metadata.json"),
+                    serde_json::to_vec_pretty(&metadata_json)?,
+                )?;
+
+                // Create zip archive from staged contents
+                let zip_name = format!(
+                    "{}-{}-{}-{}.zip",
+                    "servo",
+                    target_triple,
+                    profile.as_dir(),
+                    meta.servo_commit
+                );
+                let zip_path = out_dir.join(zip_name);
+                let zip_file = fs::File::create(&zip_path)
+                    .with_context(|| format!("create zip {}", zip_path.display()))?;
+                let mut zip = zip::ZipWriter::new(zip_file);
+                let options =
+                    FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+                for entry in WalkDir::new(&stage_root)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .filter(|e| e.file_type().is_file())
+                {
+                    let rel = entry
+                        .path()
+                        .strip_prefix(&stage_root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace("\\", "/");
+                    zip.start_file(rel, options)?;
+                    let mut f = fs::File::open(entry.path())?;
+                    use std::io::Read;
+                    use std::io::Write;
+                    let mut buf = Vec::new();
+                    f.read_to_end(&mut buf)?;
+                    zip.write_all(&buf)?;
+                }
+                let _ = zip.finish()?;
+                if args.verbose {
+                    eprintln!("Packaged zip: {}", zip_path.display());
+                }
+            }
+            PackageKind::AppImage | PackageKind::Dmg | PackageKind::Msi => {
+                eprintln!(
+                    "Requested packaging format not yet implemented: {:?}. Only zip is currently supported.",
+                    kind
+                );
+            }
         }
     }
 

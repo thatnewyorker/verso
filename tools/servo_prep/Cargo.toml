@@ -15,6 +15,11 @@ serde_json = "1.0.145"
 toml = "0.8.19"
 time = { version = "0.3.36", features = ["formatting", "macros"] }
 which = "6.0.2"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+walkdir = "2.5.0"
+tempfile = "3.10.1"
+sha2 = "0.10.8"
+hex = "0.4.3"
 
 [lints.clippy]
 needless_doctest_main = "allow"

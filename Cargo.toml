@@ -6,13 +6,20 @@ edition = "2024"
 [workspace]
 members = [
     "examples/winit_hello",
+    "examples/simple_window",
+    "examples/tray_quit",
     "versoview",
     "tools/servo_prep",
     "tools/servo_locator",
+    "tools/tauri_ipc_adapter",
+    "tools/tauri_compat_ipc",
+    "tools/window_manager",
+    "tools/tray_and_notify",
 ]
 
 [alias]
 prep-servo = "run -p servo_prep --"
+versoview-tauri-ipc = "run -p versoview --features tauri_ipc --"
 
 [features]
 default = []
@@ -25,6 +32,7 @@ versoview-runtime = [
     "dep:bincode",
 ]
 zero_copy = ["dep:nix", "dep:memmap2"]
+window_manager = ["dep:window_manager"]
 
 [dependencies]
 winit = "0.30.12"
@@ -38,6 +46,7 @@ serde = { version = "1.0.228", features = ["derive"], optional = true }
 serde_json = { version = "1.0.145", optional = true }
 bincode = { version = "2.0.1", optional = true, features = ["serde"] }
 
+window_manager = { path = "tools/window_manager", optional = true }
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30.1", optional = true, features = ["socket", "uio"] }
 memmap2 = { version = "0.9.8", optional = true }

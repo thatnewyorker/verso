@@ -516,6 +516,7 @@ impl IpcController {
                                                     proto::Response::Ack { in_reply_to } => *in_reply_to,
                                                     proto::Response::Error { in_reply_to, .. } => *in_reply_to,
                                                     proto::Response::InitAck { in_reply_to, .. } => *in_reply_to,
+                                                    proto::Response::InvokeResult { in_reply_to, .. } => *in_reply_to,
                                                 };
                                                 let maybe_tx = {
                                                     let mut st = shared.lock().unwrap();

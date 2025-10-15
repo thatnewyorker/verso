@@ -2,12 +2,23 @@ use std::cmp;
 
 use bytes::Bytes;
 
+#[cfg(any(feature = "tauri_ipc", feature = "tauri_compat_ipc"))]
+use std::sync::{Mutex, OnceLock};
+#[cfg(all(feature = "tauri_compat_ipc", not(feature = "tauri_ipc")))]
+use tauri_compat_ipc::{ChannelAdapter, CommandRegistry, InvokeRequest, InvokeResponse};
+#[cfg(feature = "tauri_ipc")]
+use tauri_ipc_adapter::{ChannelAdapter, CommandRegistry, InvokeRequest, InvokeResponse};
 use tracing::{error, info, warn};
 use verso_standalone::ipc_protocol as proto;
 use verso_standalone::ipc_transport::IpcTransport;
 #[cfg(all(unix, feature = "zero_copy"))]
 use verso_standalone::ipc_transport::OpaqueHandle;
 use verso_standalone::ipc_transport::StdIoTransport;
+
+#[cfg(any(feature = "tauri_ipc", feature = "tauri_compat_ipc"))]
+static TAURI_CHANNEL: OnceLock<ChannelAdapter> = OnceLock::new();
+#[cfg(any(feature = "tauri_ipc", feature = "tauri_compat_ipc"))]
+static TAURI_REGISTRY: OnceLock<Mutex<CommandRegistry>> = OnceLock::new();
 
 #[cfg(feature = "dioxus_engine")]
 mod dioxus_engine;
@@ -120,6 +131,16 @@ async fn run_server(mode: TransportMode) -> Result<(), Box<dyn std::error::Error
     } else {
         "stdio transport"
     };
+    #[cfg(any(feature = "tauri_ipc", feature = "tauri_compat_ipc"))]
+    {
+        let _ = TAURI_CHANNEL.get_or_init(|| ChannelAdapter::new());
+        let _ = TAURI_REGISTRY.get_or_init(|| {
+            let mut reg = CommandRegistry::new();
+            // Default sample command: echoes the JSON payload back to the caller.
+            reg.register("hello", Box::new(|payload| Ok(payload)));
+            Mutex::new(reg)
+        });
+    }
     info!("versoview server started ({mode_desc})");
 
     loop {
@@ -314,6 +335,55 @@ async fn handle_request(
             send_event(transport, next_id, evt).await?;
         }
 
+        proto::Request::Invoke {
+            command,
+            payload,
+            request_id,
+        } => {
+            #[cfg(any(feature = "tauri_ipc", feature = "tauri_compat_ipc"))]
+            {
+                let id = request_id.unwrap_or(req_id);
+                let json_payload: serde_json::Value = if payload.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::from_slice(&payload).unwrap_or(serde_json::Value::Null)
+                };
+                let req_msg = InvokeRequest {
+                    command,
+                    payload: json_payload,
+                    id,
+                };
+                let registry = TAURI_REGISTRY
+                    .get()
+                    .expect("tauri registry not initialized")
+                    .lock()
+                    .expect("tauri registry poisoned");
+                let adapter = TAURI_CHANNEL.get().expect("tauri channel not initialized");
+                let resp_msg = adapter.invoke(&registry, req_msg);
+                let (ok, data, error) = match (resp_msg.ok, resp_msg.err) {
+                    (Some(v), _) => (true, serde_json::to_vec(&v).ok(), None),
+                    (None, Some(e)) => (false, None, Some(e)),
+                    _ => (true, None, None),
+                };
+                let resp = proto::Response::InvokeResult {
+                    in_reply_to: id,
+                    ok,
+                    data,
+                    error,
+                };
+                send_response(transport, next_id, resp).await?;
+            }
+            #[cfg(not(any(feature = "tauri_ipc", feature = "tauri_compat_ipc")))]
+            {
+                let resp = proto::Response::InvokeResult {
+                    in_reply_to: req_id,
+                    ok: false,
+                    data: None,
+                    error: Some("invoke not supported (tauri_ipc feature disabled)".to_string()),
+                };
+                send_response(transport, next_id, resp).await?;
+            }
+        }
         proto::Request::Resize { width, height } => {
             info!("Resize: {}x{}", width, height);
             let _ = engine.resize(width, height);
@@ -682,11 +752,76 @@ async fn send_response(
     Ok(())
 }
 
+#[cfg(any(feature = "tauri_ipc", feature = "tauri_compat_ipc"))]
+fn status_to_str(s: proto::NavigationStatus) -> &'static str {
+    match s {
+        proto::NavigationStatus::Started => "started",
+        proto::NavigationStatus::Committed => "committed",
+        proto::NavigationStatus::Finished => "finished",
+        proto::NavigationStatus::Failed => "failed",
+    }
+}
+
+#[cfg(any(feature = "tauri_ipc", feature = "tauri_compat_ipc"))]
+fn level_to_str(l: proto::ConsoleLevel) -> &'static str {
+    match l {
+        proto::ConsoleLevel::Debug => "debug",
+        proto::ConsoleLevel::Info => "info",
+        proto::ConsoleLevel::Warn => "warn",
+        proto::ConsoleLevel::Error => "error",
+    }
+}
+
+#[cfg(any(feature = "tauri_ipc", feature = "tauri_compat_ipc"))]
+fn map_proto_event_to_adapter(evt: &proto::Event) -> Option<(String, serde_json::Value)> {
+    match evt {
+        proto::Event::Navigation {
+            status,
+            url,
+            http_status,
+        } => Some((
+            "navigation".to_string(),
+            serde_json::json!({
+                "status": status_to_str(*status),
+                "url": url,
+                "http_status": http_status,
+            }),
+        )),
+        proto::Event::ConsoleMessage {
+            level,
+            message,
+            source,
+            line,
+            column,
+        } => Some((
+            "console".to_string(),
+            serde_json::json!({
+                "level": level_to_str(*level),
+                "message": message,
+                "source": source,
+                "line": line,
+                "column": column,
+            }),
+        )),
+        proto::Event::DevToolsPortOpened { port, url } => Some((
+            "devtools_port_opened".to_string(),
+            serde_json::json!({
+                "port": port,
+                "url": url,
+            }),
+        )),
+        _ => None,
+    }
+}
+
 async fn send_event(
     transport: &mut dyn IpcTransport,
     next_id: &mut u64,
     evt: proto::Event,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(any(feature = "tauri_ipc", feature = "tauri_compat_ipc"))]
+    let emit_msg = map_proto_event_to_adapter(&evt);
+
     let env = proto::Envelope {
         version: proto::PROTOCOL_VERSION,
         id: take_id(next_id),
@@ -695,6 +830,14 @@ async fn send_event(
     };
     let bytes = serialize(&env)?;
     transport.send_frame(bytes).await?;
+
+    #[cfg(any(feature = "tauri_ipc", feature = "tauri_compat_ipc"))]
+    if let Some((name, payload)) = emit_msg {
+        if let Some(adapter) = TAURI_CHANNEL.get() {
+            adapter.emit_event(&name, &payload);
+        }
+    }
+
     Ok(())
 }
 

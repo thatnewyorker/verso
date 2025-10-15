@@ -400,7 +400,9 @@ mod tests {
     #[test]
     fn env_override_not_set() {
         // Should be None if env var not set.
-        std::env::remove_var("VERSO_SERVO_BIN");
+        unsafe {
+            std::env::set_var("VERSO_SERVO_BIN", "__verso_test_dne__");
+        }
         assert!(env_servo_bin().is_none());
     }
 }

@@ -1,0 +1,77 @@
+[package]
+name = "tray_and_notify"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Minimal, feature-gated system tray and notifications API for Verso (platform backends optional)."
+repository = "https://example.com/verso"
+readme = false
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[features]
+default = []
+
+# Enable tracing instrumentation inside this crate.
+tracing = ["dep:tracing"]
+
+# Enable serde for menu specs and payloads (optional).
+serde = ["dep:serde"]
+
+# High-level toggles (enable all platform-specific subfeatures)
+tray = ["tray-linux", "tray-macos", "tray-windows"]
+notifications = ["notify-linux", "notify-macos", "notify-windows"]
+
+# Platform-specific subfeatures (these may pull in optional deps below).
+# Start small; wire real backends progressively.
+tray-linux = ["dep:tray-icon", "dep:muda"]
+tray-macos = ["dep:tray-icon", "dep:muda"]
+tray-windows = ["dep:tray-icon", "dep:muda"]
+
+notify-linux = ["dep:notify-rust"]
+notify-macos = []
+notify-windows = []
+
+[dependencies]
+# Optional utilities (kept light)
+tracing = { version = "0.1", optional = true }
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+
+# Cross-platform helpers you may introduce in later steps:
+# serde_json = { version = "1.0", optional = true }
+
+# Platform-specific, optional deps: only compiled on matching targets.
+[target.'cfg(target_os = "linux")'.dependencies]
+# Notifications on Linux
+notify-rust = { version = "4", optional = true }
+# Tray icon backend (optional)
+tray-icon = { version = "0.13", optional = true }
+# Menu backend (optional)
+muda = { version = "0.13", optional = true }
+# Tray backends can be added as needed (e.g., ayatana-appindicator bindings)
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS system integration (optional; wire in when implementing)
+objc = { version = "0.2", optional = true }
+cocoa = { version = "0.25", optional = true }
+# Tray icon and menu backends
+tray-icon = { version = "0.13", optional = true }
+muda = { version = "0.13", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows notifications/tray integration (select features as needed later)
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+], optional = true }
+# Tray icon and menu backends
+tray-icon = { version = "0.13", optional = true }
+muda = { version = "0.13", optional = true }
+
+[lints.clippy]
+needless_doctest_main = "allow"

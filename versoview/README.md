@@ -136,3 +136,25 @@ To run only versoview tests:
   - Ensure you sent `BindSurface` and `RequestDraw`/`DrawNow` after `Load`.
 - Build errors on older Rust:
   - Use Rust 1.90 toolchain as required.
+
+## Quickstart: create a window with the lightweight window manager
+
+A small, ergonomic builder API is available in the `window_manager` crate to help you describe and drive windows and webviews in a dependency-light way.
+
+Try the ready-to-run example:
+
+    cargo run -p simple_window
+
+What this demonstrates:
+- Constructing a `VersoWindow` via `WindowBuilder` (title, size, decorations, resizable).
+- Attaching initialization scripts and an optional `devtools_port`.
+- Hooking basic lifecycle events (title change, focus, close).
+- A minimal “invoke” round-trip using the Tauri-like adapter (optional).
+
+Notes on integration:
+- The builder’s `initialization_scripts` and `devtools_port` map to the Verso handshake fields (`ControllerConfig.init_scripts` and `ControllerConfig.devtools_port`) used by `versoview` during `Init`.
+- If you want to exercise the invoke protocol end-to-end, run `versoview` with the IPC feature enabled:
+
+    cargo run -p versoview --features tauri_ipc
+
+This keeps defaults lean while providing an easy path to opt in to richer developer tooling as needed.

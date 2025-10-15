@@ -82,6 +82,16 @@ pub enum Request {
         request_id: Option<u64>,
     },
 
+    /// Invoke a command on the server (host) with an optional binary payload.
+    Invoke {
+        /// Command name or path.
+        command: String,
+        /// Opaque payload bytes; interpretation is up to the selected IPC adapter.
+        payload: Vec<u8>,
+        /// Optional caller-supplied request/correlation ID.
+        request_id: Option<u64>,
+    },
+
     /// Notify a size change (physical pixels).
     Resize { width: u32, height: u32 },
 
@@ -118,6 +128,18 @@ pub enum Response {
         chosen_version: u16,
         server_name: String,
         capabilities: Capabilities,
+    },
+
+    /// Result of an `Invoke` request.
+    InvokeResult {
+        /// Correlation id of the matching `Invoke` request.
+        in_reply_to: u64,
+        /// Indicates success when true; when false, consult `error`.
+        ok: bool,
+        /// Optional returned payload bytes.
+        data: Option<Vec<u8>>,
+        /// Optional error message when the invoke failed.
+        error: Option<String>,
     },
 }
 

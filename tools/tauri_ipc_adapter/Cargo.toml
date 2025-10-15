@@ -1,0 +1,26 @@
+[package]
+name = "tauri_ipc_adapter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Lightweight Tauri-like IPC and event adapter for Verso/versoview, focused on minimal dependencies and serde-based transport."
+
+[lib]
+name = "tauri_ipc_adapter"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[features]
+default = []
+tracing = ["dep:tracing"]
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+bincode = "1.3.3"
+thiserror = "1.0.64"
+tracing = { version = "0.1", optional = true }
+
+[lints.clippy]
+needless_doctest_main = "allow"
