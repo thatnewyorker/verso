@@ -407,6 +407,8 @@ pub struct WinitRuntime<T: 'static = ()> {
     external_user_tx: Arc<Mutex<Option<mpsc::Sender<T>>>>,
     /// External user event channel (receiver) drained on the event-loop thread.
     external_user_rx: Arc<Mutex<Option<mpsc::Receiver<T>>>>,
+    /// Optional window to create automatically when the event loop resumes.
+    startup_window: Arc<Mutex<Option<WindowAttributes>>>,
 }
 
 impl<T> Default for WinitRuntime<T>
@@ -430,6 +432,7 @@ where
             on_user_event: Arc::new(Mutex::new(None)),
             external_user_tx: Arc::new(Mutex::new(None)),
             external_user_rx: Arc::new(Mutex::new(None)),
+            startup_window: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -465,6 +468,12 @@ where
             attrs = attrs.with_inner_size(sz);
         }
         self.create_window_with(attrs)
+    }
+
+    /// Set a window to be created automatically when the event loop resumes.
+    pub fn set_startup_window(&self, attrs: WindowAttributes) {
+        let mut g = self.startup_window.lock().unwrap();
+        *g = Some(attrs);
     }
 
     /// Register an event subscriber for a given window.
@@ -566,6 +575,7 @@ where
     ///
     /// This blocks until the application exits.
     pub fn run(self, on_user_event: impl FnMut(T) + 'static) -> Result<(), WinitRuntimeError> {
+        eprintln!("WinitRuntime: run() starting");
         // Build the event loop
         let event_loop = EventLoop::<RuntimeEvent<T>>::with_user_event()
             .build()
@@ -669,20 +679,28 @@ where
     ) -> Result<(), WinitRuntimeError> {
         match cmd {
             InternalCommand::CreateWindow { attrs, respond_to } => {
-                let window = event_loop
-                    .create_window(attrs)
-                    .map_err(|_| WinitRuntimeError::Backend("failed to create window"))?;
-                let id = window.id();
-                self.windows.insert(id, window);
-                // Initialize subscriber list
-                self.runtime
-                    .windows
-                    .lock()
-                    .unwrap()
-                    .entry(id)
-                    .or_insert_with(WindowRecord::default);
-                // Respond back with the new id
-                let _ = respond_to.send(id);
+                match event_loop.create_window(attrs) {
+                    Ok(window) => {
+                        let id = window.id();
+                        self.windows.insert(id, window);
+                        // Initialize subscriber list
+                        self.runtime
+                            .windows
+                            .lock()
+                            .unwrap()
+                            .entry(id)
+                            .or_insert_with(WindowRecord::default);
+                        // Respond back with the new id
+                        let _ = respond_to.send(id);
+                        eprintln!("WinitRuntime: created window via InternalCommand: {:?}", id);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "WinitRuntime: failed to create window via InternalCommand: {e:?}"
+                        );
+                        return Err(WinitRuntimeError::Backend("failed to create window"));
+                    }
+                }
             }
             InternalCommand::RequestRedraw(id) => {
                 if let Some(w) = self.windows.get(&id) {
@@ -750,7 +768,35 @@ where
     T: 'static + Send,
 {
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
-        // App has entered the "resumed" state; platforms may deliver events now.
+        // Create a startup window if one was configured.
+        let maybe_attrs = {
+            let mut guard = self.runtime.startup_window.lock().unwrap();
+            guard.take()
+        };
+        eprintln!(
+            "WinitRuntime: resumed; startup_window_configured={}",
+            maybe_attrs.is_some()
+        );
+        if let Some(attrs) = maybe_attrs {
+            match _event_loop.create_window(attrs) {
+                Ok(window) => {
+                    let id = window.id();
+                    // Track the real window
+                    self.windows.insert(id, window);
+                    // Initialize subscriber list in the runtime registry
+                    self.runtime
+                        .windows
+                        .lock()
+                        .unwrap()
+                        .entry(id)
+                        .or_insert_with(WindowRecord::default);
+                    eprintln!("WinitRuntime: startup window created: {:?}", id);
+                }
+                Err(e) => {
+                    eprintln!("WinitRuntime: startup window creation failed: {e:?}");
+                }
+            }
+        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: RuntimeEvent<T>) {

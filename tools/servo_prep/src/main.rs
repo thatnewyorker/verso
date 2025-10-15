@@ -481,11 +481,351 @@ fn main() -> Result<()> {
                     eprintln!("Packaged zip: {}", zip_path.display());
                 }
             }
-            PackageKind::AppImage | PackageKind::Dmg | PackageKind::Msi => {
-                eprintln!(
-                    "Requested packaging format not yet implemented: {:?}. Only zip is currently supported.",
-                    kind
-                );
+            PackageKind::AppImage => {
+                // Build AppDir and produce an AppImage with `appimagetool`.
+                let staging = TempDir::new().context("create staging dir")?;
+                let appdir = staging.path().join("AppDir");
+
+                fs::create_dir_all(appdir.join("usr/bin"))
+                    .with_context(|| format!("create dir {}", appdir.join("usr/bin").display()))?;
+                fs::create_dir_all(appdir.join("usr/share/applications"))?;
+                fs::create_dir_all(appdir.join("usr/share/icons/hicolor/256x256/apps"))?;
+                fs::create_dir_all(appdir.join("usr/share/doc/verso"))?;
+
+                // Copy binary into AppDir/usr/bin/verso
+                let app_bin_name = if cfg!(windows) { "verso.exe" } else { "verso" };
+                let app_bin = appdir.join("usr/bin").join(app_bin_name);
+                fs::copy(&dest_bin, &app_bin).with_context(|| {
+                    format!("copy {} -> {}", dest_bin.display(), app_bin.display())
+                })?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perm = fs::metadata(&app_bin)?.permissions();
+                    perm.set_mode(0o755);
+                    fs::set_permissions(&app_bin, perm)?;
+                }
+
+                // Copy user-provided resources into AppDir/usr/bin
+                for r in &args.bundle_resources {
+                    let src = if r.is_absolute() {
+                        r.clone()
+                    } else {
+                        ws_root.join(r)
+                    };
+                    if src.is_file() {
+                        let target = appdir.join("usr/bin").join(src.file_name().unwrap());
+                        if let Some(parent) = target.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+                        fs::copy(&src, &target).with_context(|| {
+                            format!("stage resource {} -> {}", src.display(), target.display())
+                        })?;
+                    } else if src.is_dir() {
+                        let base = src.file_name().unwrap().to_owned();
+                        for entry in WalkDir::new(&src)
+                            .into_iter()
+                            .filter_map(Result::ok)
+                            .filter(|e| e.file_type().is_file())
+                        {
+                            let rel = entry.path().strip_prefix(&src).unwrap();
+                            let target = appdir.join("usr/bin").join(&base).join(rel);
+                            if let Some(parent) = target.parent() {
+                                fs::create_dir_all(parent)?;
+                            }
+                            fs::copy(entry.path(), &target).with_context(|| {
+                                format!(
+                                    "stage resource {} -> {}",
+                                    entry.path().display(),
+                                    target.display()
+                                )
+                            })?;
+                        }
+                    }
+                }
+
+                // Write metadata.json with checksums for staged AppDir
+                let mut checksums = serde_json::Map::new();
+                for entry in WalkDir::new(&appdir)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .filter(|e| e.file_type().is_file())
+                {
+                    let rel = entry
+                        .path()
+                        .strip_prefix(&appdir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string();
+                    let mut f = fs::File::open(entry.path())?;
+                    use std::io::Read;
+                    let mut hasher = Sha256::new();
+                    let _ = std::io::copy(&mut f, &mut hasher)?;
+                    let digest = hasher.finalize();
+                    checksums.insert(rel, serde_json::Value::String(hex::encode(digest)));
+                }
+                let metadata_json = serde_json::json!({
+                    "servo_commit": meta.servo_commit,
+                    "build_profile": meta.build_profile,
+                    "enabled_features": meta.enabled_features,
+                    "timestamp": meta.timestamp,
+                    "target_triple": meta.target_triple,
+                    "rust_toolchain": meta.rust_toolchain,
+                    "binary_name": meta.binary_name,
+                    "package": "AppImage",
+                    "checksums": checksums,
+                });
+                fs::write(
+                    appdir.join("usr/share/doc/verso/metadata.json"),
+                    serde_json::to_vec_pretty(&metadata_json)?,
+                )?;
+
+                // Desktop file and AppRun script
+                fs::write(
+                    appdir.join("verso.desktop"),
+                    "[Desktop Entry]\nType=Application\nName=Verso\nExec=verso\nIcon=verso\nCategories=Utility;\n",
+                )?;
+                let apprun = appdir.join("AppRun");
+                fs::write(
+                    &apprun,
+                    "#!/usr/bin/env bash\nset -euo pipefail\nHERE=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nexec \"$HERE/usr/bin/verso\" \"$@\"\n",
+                )?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perm = fs::metadata(&apprun)?.permissions();
+                    perm.set_mode(0o755);
+                    fs::set_permissions(&apprun, perm)?;
+                }
+
+                // Produce AppImage
+                let appimagetool = which("appimagetool")
+                    .context("`appimagetool` not found in PATH. Install AppImageKit appimagetool to produce an AppImage.")?;
+                let appimage_out = out_dir.join(format!("Verso-{}.AppImage", target_triple));
+                let status = Command::new(appimagetool)
+                    .arg(&appdir)
+                    .arg(&appimage_out)
+                    .status()
+                    .with_context(|| "failed to spawn appimagetool")?;
+                if !status.success() {
+                    return Err(anyhow!(
+                        "appimagetool failed with status {}",
+                        status.code().unwrap_or(-1)
+                    ));
+                }
+                if args.verbose {
+                    eprintln!("Packaged AppImage: {}", appimage_out.display());
+                }
+            }
+            PackageKind::Dmg => {
+                // Stage a .app bundle and create a DMG with hdiutil (macOS only).
+                if cfg!(target_os = "macos") {
+                    let staging = TempDir::new().context("create staging dir")?;
+                    let app_bundle = staging.path().join("Verso.app");
+                    fs::create_dir_all(app_bundle.join("Contents/MacOS"))?;
+                    fs::create_dir_all(app_bundle.join("Contents/Resources"))?;
+
+                    // Copy binary
+                    let mac_bin = app_bundle.join("Contents/MacOS/verso");
+                    fs::copy(&dest_bin, &mac_bin).with_context(|| {
+                        format!("copy {} -> {}", dest_bin.display(), mac_bin.display())
+                    })?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let mut perm = fs::metadata(&mac_bin)?.permissions();
+                        perm.set_mode(0o755);
+                        fs::set_permissions(&mac_bin, perm)?;
+                    }
+
+                    // Copy resources into Contents/Resources
+                    for r in &args.bundle_resources {
+                        let src = if r.is_absolute() {
+                            r.clone()
+                        } else {
+                            ws_root.join(r)
+                        };
+                        if src.is_file() {
+                            let target = app_bundle
+                                .join("Contents/Resources")
+                                .join(src.file_name().unwrap());
+                            if let Some(parent) = target.parent() {
+                                fs::create_dir_all(parent)?;
+                            }
+                            fs::copy(&src, &target)?;
+                        } else if src.is_dir() {
+                            let base = src.file_name().unwrap().to_owned();
+                            for entry in WalkDir::new(&src)
+                                .into_iter()
+                                .filter_map(Result::ok)
+                                .filter(|e| e.file_type().is_file())
+                            {
+                                let rel = entry.path().strip_prefix(&src).unwrap();
+                                let target =
+                                    app_bundle.join("Contents/Resources").join(&base).join(rel);
+                                if let Some(parent) = target.parent() {
+                                    fs::create_dir_all(parent)?;
+                                }
+                                fs::copy(entry.path(), &target)?;
+                            }
+                        }
+                    }
+
+                    // Minimal Info.plist
+                    let info_plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Verso</string>
+  <key>CFBundleIdentifier</key><string>org.example.verso</string>
+  <key>CFBundleExecutable</key><string>verso</string>
+  <key>CFBundlePackageType</</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>1.0.0</string>
+  <key>CFBundleShortVersionString</key><string>1.0.0</string>
+</dict>
+</plist>
+"#;
+                    fs::write(app_bundle.join("Contents/Info.plist"), info_plist)?;
+
+                    // metadata.json in Resources
+                    let mut checksums = serde_json::Map::new();
+                    for entry in WalkDir::new(app_bundle.join("Contents"))
+                        .into_iter()
+                        .filter_map(Result::ok)
+                        .filter(|e| e.file_type().is_file())
+                    {
+                        let rel = entry
+                            .path()
+                            .strip_prefix(app_bundle.join("Contents"))
+                            .unwrap()
+                            .to_string_lossy()
+                            .to_string();
+                        let mut f = fs::File::open(entry.path())?;
+                        use std::io::Read;
+                        let mut hasher = Sha256::new();
+                        let _ = std::io::copy(&mut f, &mut hasher)?;
+                        let digest = hasher.finalize();
+                        checksums.insert(rel, serde_json::Value::String(hex::encode(digest)));
+                    }
+                    let metadata_json = serde_json::json!({
+                        "servo_commit": meta.servo_commit,
+                        "build_profile": meta.build_profile,
+                        "enabled_features": meta.enabled_features,
+                        "timestamp": meta.timestamp,
+                        "target_triple": meta.target_triple,
+                        "rust_toolchain": meta.rust_toolchain,
+                        "binary_name": meta.binary_name,
+                        "package": "DMG",
+                        "checksums": checksums,
+                    });
+                    fs::write(
+                        app_bundle.join("Contents/Resources/metadata.json"),
+                        serde_json::to_vec_pretty(&metadata_json)?,
+                    )?;
+
+                    // Create DMG with hdiutil
+                    let hdiutil = which("hdiutil")
+                        .context("`hdiutil` not found in PATH; DMG packaging requires macOS.")?;
+                    let dmg_out = out_dir.join("Verso.dmg");
+                    let status = Command::new(hdiutil)
+                        .arg("create")
+                        .arg("-volname")
+                        .arg("Verso")
+                        .arg("-srcfolder")
+                        .arg(&app_bundle)
+                        .arg("-ov")
+                        .arg("-format")
+                        .arg("UDZO")
+                        .arg(&dmg_out)
+                        .status()
+                        .with_context(|| "failed to spawn hdiutil")?;
+                    if !status.success() {
+                        return Err(anyhow!(
+                            "hdiutil failed with status {}",
+                            status.code().unwrap_or(-1)
+                        ));
+                    }
+                    if args.verbose {
+                        eprintln!("Packaged DMG: {}", dmg_out.display());
+                    }
+                } else {
+                    return Err(anyhow!("DMG packaging requires macOS (hdiutil)."));
+                }
+            }
+            PackageKind::Msi => {
+                // Build an MSI with WiX (Windows only).
+                if cfg!(target_os = "windows") {
+                    let candle = which("candle.exe")
+                        .context("`candle.exe` not found in PATH; install WiX Toolset.")?;
+                    let light = which("light.exe")
+                        .context("`light.exe` not found in PATH; install WiX Toolset.")?;
+                    let staging = TempDir::new().context("create staging dir")?;
+                    let wix_dir = staging.path().join("wix");
+                    fs::create_dir_all(&wix_dir)?;
+                    let wix_src = wix_dir.join("verso.wxs");
+
+                    // Minimal WiX source using the staged binary
+                    let wix_xml = format!(
+"<?xml version='1.0' encoding='UTF-8'?>
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+  <Product Id='*' Name='Verso' Language='1033' Version='1.0.0.0' Manufacturer='Verso' UpgradeCode='PUT-GUID-HERE'>
+    <Package InstallerVersion='500' Compressed='yes' InstallScope='perMachine' />
+    <MediaTemplate />
+    <Directory Id='TARGETDIR' Name='SourceDir'>
+      <Directory Id='ProgramFilesFolder'>
+        <Directory Id='INSTALLFOLDER' Name='Verso' />
+      </Directory>
+    </Directory>
+    <DirectoryRef Id='INSTALLFOLDER'>
+      <Component Id='MainExe' Guid='PUT-GUID-HERE'>
+        <File Id='VersoExe' Source='{exe}' KeyPath='yes' Checksum='yes' />
+      </Component>
+    </DirectoryRef>
+    <Feature Id='DefaultFeature' Level='1'>
+      <ComponentRef Id='MainExe' />
+    </Feature>
+  </Product>
+</Wix>
+", exe = dest_bin.display());
+                    fs::write(&wix_src, wix_xml)?;
+
+                    // Compile with candle
+                    let wixobj = wix_dir.join("verso.wixobj");
+                    let status = Command::new(candle)
+                        .arg(&wix_src)
+                        .arg("-o")
+                        .arg(&wixobj)
+                        .status()
+                        .with_context(|| "failed to spawn candle.exe")?;
+                    if !status.success() {
+                        return Err(anyhow!(
+                            "candle.exe failed with status {}",
+                            status.code().unwrap_or(-1)
+                        ));
+                    }
+
+                    // Link with light
+                    let msi_out = out_dir.join("Verso.msi");
+                    let status = Command::new(light)
+                        .arg(&wixobj)
+                        .arg("-o")
+                        .arg(&msi_out)
+                        .status()
+                        .with_context(|| "failed to spawn light.exe")?;
+                    if !status.success() {
+                        return Err(anyhow!(
+                            "light.exe failed with status {}",
+                            status.code().unwrap_or(-1)
+                        ));
+                    }
+                    if args.verbose {
+                        eprintln!("Packaged MSI: {}", msi_out.display());
+                    }
+                } else {
+                    return Err(anyhow!(
+                        "MSI packaging requires Windows with WiX Toolset installed."
+                    ));
+                }
             }
         }
     }

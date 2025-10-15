@@ -106,8 +106,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     // Handle custom user events posted to the event loop (if any)
     // })?;
 
-    println!(
-        "Skeleton updated. Mock-only wiring is illustrated in comments: bind a VersoWebviewHost, attach it to the runtime, and register a ControllerEventSubscriber to forward input and draw events."
+    // Configure a startup window; the runtime will create it on resume.
+    eprintln!("winit_hello: configuring startup window (800x600) with title 'Verso Hello'");
+    runtime.set_startup_window(
+        winit::window::Window::default_attributes()
+            .with_title("Verso Hello".to_string())
+            .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0)),
     );
+
+    // Start the winit event loop (blocks until all windows are closed).
+    eprintln!(
+        "winit_hello: entering runtime.run() (XDG_SESSION_TYPE={:?}, WAYLAND_DISPLAY={:?})",
+        std::env::var("XDG_SESSION_TYPE").ok(),
+        std::env::var("WAYLAND_DISPLAY").ok()
+    );
+    runtime.run(|_user_event: ()| {
+        // Handle custom user events posted to the event loop (if any)
+    })?;
     Ok(())
 }
