@@ -9,8 +9,13 @@ use verso_standalone::ipc_transport::IpcTransport;
 use verso_standalone::ipc_transport::OpaqueHandle;
 use verso_standalone::ipc_transport::StdIoTransport;
 
+#[cfg(feature = "dioxus_engine")]
+mod dioxus_engine;
 mod engine;
 mod servo_engine;
+
+#[cfg(feature = "dioxus_engine")]
+use crate::dioxus_engine::DioxusEngine;
 use crate::engine::{DemoEngine, Engine, EngineFrame, EngineInit};
 use crate::servo_engine::ServoEngine;
 #[cfg(all(unix, feature = "zero_copy"))]
@@ -93,6 +98,18 @@ async fn run_server(mode: TransportMode) -> Result<(), Box<dyn std::error::Error
     let engine_choice = std::env::var("VERSOVIEW_ENGINE").unwrap_or_else(|_| "servo".to_string());
     let mut engine: Box<dyn Engine> = if engine_choice.eq_ignore_ascii_case("demo") {
         Box::new(DemoEngine::new())
+    } else if engine_choice.eq_ignore_ascii_case("dioxus") {
+        #[cfg(feature = "dioxus_engine")]
+        {
+            Box::new(DioxusEngine::new())
+        }
+        #[cfg(not(feature = "dioxus_engine"))]
+        {
+            warn!(
+                "VERSOVIEW_ENGINE=dioxus requested but 'dioxus_engine' feature is not enabled; falling back to servo"
+            );
+            Box::new(ServoEngine::new())
+        }
     } else {
         Box::new(ServoEngine::new())
     };
@@ -324,19 +341,19 @@ async fn handle_request(
             // Ask the engine for a frame and map it to a protocol descriptor.
             if let Ok(Some(frame)) = engine.request_draw() {
                 // Choose a token for any out-of-band handle attachments.
-                let token = next_id.saturating_add(1);
+                let _token = next_id.saturating_add(1);
                 // Map EngineFrame -> (FrameDescriptor, optional attached handles)
                 #[allow(unused_mut)]
                 #[cfg(all(unix, feature = "zero_copy"))]
                 let mut handles: Vec<OpaqueHandle> = Vec::new();
                 #[cfg(not(all(unix, feature = "zero_copy")))]
-                let mut handles: Vec<()> = Vec::new();
+                let handles: Vec<()> = Vec::new();
                 let descriptor = match frame {
                     EngineFrame::SharedMemoryInline {
                         width,
                         height,
-                        stride,
-                        format,
+                        stride: _,
+                        format: _,
                         bytes,
                     } => {
                         // Use compressed fallback path with inline payload for portability.
@@ -483,18 +500,18 @@ async fn handle_request(
             )
             .await?;
             if let Ok(Some(frame)) = engine.draw_now() {
-                let token = next_id.saturating_add(1);
+                let _token = next_id.saturating_add(1);
                 #[allow(unused_mut)]
                 #[cfg(all(unix, feature = "zero_copy"))]
                 let mut handles: Vec<OpaqueHandle> = Vec::new();
                 #[cfg(not(all(unix, feature = "zero_copy")))]
-                let mut handles: Vec<()> = Vec::new();
+                let handles: Vec<()> = Vec::new();
                 let descriptor = match frame {
                     EngineFrame::SharedMemoryInline {
                         width,
                         height,
-                        stride,
-                        format,
+                        stride: _,
+                        format: _,
                         bytes,
                     } => proto::FrameDescriptor::CompressedImage {
                         width,

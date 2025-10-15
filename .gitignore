@@ -1,2 +1,4 @@
 /target
 .vscode
+# Ignore locally built Servo artifacts
+third_party/servo-binaries/

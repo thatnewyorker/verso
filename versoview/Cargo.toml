@@ -11,8 +11,9 @@ path = "src/main.rs"
 
 [features]
 default = []
-servo-engine = []
+servo-engine = ["dep:libservo", "dep:image"]
 zero_copy = ["verso-standalone/zero_copy", "dep:nix", "dep:memmap2"]
+dioxus_engine = ["dep:dioxus", "dep:dioxus-html", "dep:dioxus-ssr", "dep:image"]
 
 [dependencies]
 # Use the local verso-standalone crate for protocol and transport definitions.
@@ -30,6 +31,15 @@ bincode = { version = "2.0.1", features = ["serde"] }
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+# Dioxus SSR integration (feature-gated via `dioxus_engine`)
+dioxus = { version = "0.6.3", optional = true }
+dioxus-html = { version = "0.6.3", optional = true }
+dioxus-ssr = { version = "0.6.2", optional = true }
+
+# PNG encoding for frame payloads (feature-gated via `dioxus_engine`)
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+libservo = { path = "../../servo/components/servo", optional = true }
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30.1", optional = true, features = ["socket", "uio"] }
 memmap2 = { version = "0.9.8", optional = true }

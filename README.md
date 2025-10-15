@@ -167,3 +167,104 @@ Dual-licensed under Apache-2.0 and MIT. See the `LICENSE.txt` file for details.
 
 - [Verso](https://github.com/tauri-apps/verso) and [Servo](https://servo.org/) for the webview technology.
 - [winit](https://github.com/rust-windowing/winit) for the cross-platform window and event loop abstractions.
+
+---
+
+## Servo build-on-demand (servo_prep)
+
+This workspace includes a small Rust CLI that builds Servo from a local checkout and stages the resulting binary under a deterministic, verso-managed directory alongside metadata. This keeps runtime usage of Servo simple (no Servo sources required at runtime) while letting you rebuild locally when needed.
+
+- CLI crate: `tools/servo_prep`
+- Config file (defaults): `servo-build-config.toml` in the repository root
+- Locator library: `tools/servo_locator` for runtime discovery of the prepared binary
+
+### Quickstart
+
+- Ensure you have a local Servo checkout:
+  - Set `SERVO_SRC` to the path of your Servo repo (e.g., `SERVO_SRC=../servo`)
+- Build and stage a release binary (examples):
+  - `cargo run -p servo_prep -- --profile release`
+  - Or use the alias added to this workspace: `cargo prep-servo -- --profile release`
+  - To also copy the binary into a path inside this project, use `--copy_to`:
+    - Treat as directory (appends the binary filename):  
+      `cargo run -p servo_prep -- --profile release --copy_to verso/versoview`
+    - Treat as an exact file path (uses the given filename):  
+      `cargo run -p servo_prep -- --profile release --copy_to verso/versoview/servo`
+  - To skip creating/updating the `current` symlink or `latest.json` manifest, add `--no_current_pointer`.
+  - Config equivalents: set `no_current_pointer = true` and/or `copy_to = ["path1", "path2"]` in `servo-build-config.toml`. Precedence: CLI > env > config. The `--copy_to` flag appends to any `copy_to` entries from config; `--no_current_pointer` on the CLI disables the pointer even if the config leaves it false.
+- The tool prints the final staged path to the prepared binary on success.
+
+Environment variables:
+- `SERVO_SRC`: absolute or relative path to the Servo checkout (highest precedence if CLI flag not provided).
+- `VERSO_SERVO_LOCAL_DIR`: override the base staging directory (default is `third_party/servo-binaries/local` under this repo).
+- `VERSO_SERVO_BIN`: direct path to a Servo executable; at runtime this bypasses discovery.
+
+### Configuration (servo-build-config.toml)
+
+Defaults live in `servo-build-config.toml` and can be overridden by CLI flags or environment variables. Notable keys:
+- `servo_src`: path to local Servo checkout (optional; prefer `SERVO_SRC` or CLI)
+- `target_binary`: Servo Cargo binary to build (e.g., `servo`, `servoshell`); default `servo`
+- `profile`: `debug` or `release`; default `release`
+- `features`: list of Servo Cargo features to enable; default empty
+- `output_dir`: relative path for staging; default `third_party/servo-binaries/local`
+- `rust_toolchain`: optional rustup toolchain (e.g., `stable`, `1.90.0`, `nightly-YYYY-MM-DD`) used via `cargo +<toolchain> build`
+
+Example:
+- `SERVO_SRC=../servo cargo prep-servo -- --profile release`
+- `cargo run -p servo_prep -- --servo-src ../servo --binary-name servo --features "" --toolchain stable`
+
+### Artifact layout
+
+By default, artifacts are staged under:
+
+- `third_party/servo-binaries/local/<target-triple>/<profile>/<servo-commit>/`
+  - `servo` (or `servo.exe` on Windows)
+  - `metadata.toml`
+- A convenience pointer is also maintained:
+  - `third_party/servo-binaries/local/<target-triple>/<profile>/current` → `<servo-commit>`
+  - You can suppress pointer creation with `--no_current_pointer`; otherwise, if a symlink cannot be created (e.g., due to permissions), a `latest.json` manifest is written instead.
+
+The `metadata.toml` records:
+- Servo commit SHA
+- Build profile
+- Enabled features
+- Timestamp (UTC)
+- Host target triple
+- Rust toolchain version
+- Binary name built
+
+### Runtime lookup (servo_locator)
+
+Use the `servo_locator` helper to discover the prepared binary at runtime:
+
+Precedence:
+1. `VERSO_SERVO_BIN` environment variable (direct path to an executable)
+2. Verso-managed storage: scans `third_party/servo-binaries/local/<target>/<profile>/{current|latest.json|<commit>}`
+3. Returns `None` if nothing is found
+
+Typical use:
+- Prefer `release` profile and host triple by default.
+- Allow overrides via environment variables for development or CI.
+
+### Developer workflow
+
+- One-time setup:
+  - Install Servo build requirements (OS packages) as documented in the Servo repository.
+  - Ensure `rustup`, `cargo`, and `git` are available on your PATH.
+- Prepare a binary whenever Servo changes:
+  - `SERVO_SRC=../servo cargo prep-servo -- --profile release`
+- Run your app or `versoview` using the staged binary discovered by the locator.
+- To pin a specific binary for testing:
+  - Set `VERSO_SERVO_BIN=/absolute/path/to/servo` and skip discovery.
+
+Notes:
+- Building Servo can be resource-intensive; do not perform this during routine startup. Keep it an explicit step for developers/CI.
+- For cross-target builds, pass `--target <triple>` to `servo_prep`. The artifact will be staged under that triple’s directory.
+
+### Troubleshooting
+
+Common issues:
+- Missing system dependencies for Servo build (e.g., libclang, platform graphics libs): consult Servo’s `README.md` and build docs.
+- Wrong toolchain: set `rust_toolchain` in `servo-build-config.toml` or pass `--toolchain` to the CLI.
+- Build failures: re-run with `--verbose` to see the exact Cargo invocation; inspect the Servo workspace output under `target/`.
+

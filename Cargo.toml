@@ -7,7 +7,12 @@ edition = "2024"
 members = [
     "examples/winit_hello",
     "versoview",
+    "tools/servo_prep",
+    "tools/servo_locator",
 ]
+
+[alias]
+prep-servo = "run -p servo_prep --"
 
 [features]
 default = []
