@@ -1,0 +1,92 @@
+# servo-build-config.toml
+#
+# Purpose:
+# - Default, versioned configuration for preparing a local Servo binary for Verso.
+# - Used by the `servo_prep` helper (a small Rust CLI in this workspace) to:
+#     1) build the desired Servo binary from a local Servo checkout,
+#     2) copy the resulting executable into a deterministic Verso-managed directory,
+#     3) write build metadata next to the artifact for traceability.
+#
+# How precedence works (highest → lowest):
+# - CLI flags (e.g. --servo-src, --profile) override everything below.
+# - Environment variables (see notes).
+# - Values in this config file.
+#
+# Key environment variables (optional):
+# - SERVO_SRC: absolute or relative path to a local Servo checkout.
+# - VERSO_SERVO_BIN: direct path to a Servo executable (skips discovery).
+# - VERSO_SERVO_LOCAL_DIR: override the base staging directory below
+#   (defaults to "third_party/servo-binaries/local" within this repo).
+#
+# Artifact layout (by default):
+#   third_party/servo-binaries/local/<target-triple>/<profile>/<commit>/
+#     ├── servo[.exe]
+#     └── metadata.toml
+#   ... and a convenience pointer:
+#     third_party/servo-binaries/local/<target-triple>/<profile>/current -> <commit>
+#
+# Notes:
+# - Windows executables automatically get the ".exe" suffix; you should still
+#   use the logical name "servo" in config/CLI.
+# - If you need a specific Servo binary target (e.g., "servoshell"), set
+#   `target_binary = "servoshell"`.
+# - If Servo requires a particular toolchain, set `rust_toolchain` to that
+#   value (e.g., "1.90.0" or "nightly-YYYY-MM-DD"). The helper will invoke
+#   `cargo +<toolchain> build` when specified.
+#
+# Example CLI usage:
+#   cargo run -p servo_prep -- \
+#     --servo-src ../servo \
+#     --profile release \
+#     --binary-name servo \
+#     --features "" \
+#     --toolchain stable
+#
+# Or simply:
+#   SERVO_SRC=../servo cargo run -p servo_prep
+#
+# If you only want to refresh metadata/copy without building:
+#   cargo run -p servo_prep -- --metadata-only
+#
+# ------------------------------------------------------------------------------
+# Configuration values (can be overridden by CLI or env)
+# ------------------------------------------------------------------------------
+
+# Path to your local Servo checkout (unset by default; prefer SERVO_SRC or CLI).
+# Example:
+# servo_src = "../servo"
+
+# Which Cargo binary to build in the Servo workspace.
+# Typically "servo" or "servoshell". Default: "servo"
+target_binary = "servo"
+
+# Build profile: "debug" or "release"
+profile = "release"
+
+# Servo Cargo features to enable. Leave empty unless you know you need specific
+# Servo features for your workflow. Example: ["webrender"]
+features = []
+
+# Relative output directory (under the Verso repository root) where prepared
+# artifacts are staged (do not commit binary contents).
+output_dir = "third_party/servo-binaries/local"
+
+# Recommended rustup toolchain to use for building Servo. This is passed to
+# Cargo as `+<toolchain>` when set. Use "stable", an exact version (e.g. "1.90.0"),
+# or a nightly name (e.g. "nightly-2024-08-01") if Servo requires it.
+rust_toolchain = "stable"
+
+# Optional: disable creation of the `current` symlink or `latest.json` manifest when staging artifacts.
+# When true, the prepare tool will not create or update these pointers.
+# CLI override: --no_current_pointer
+# Default: false
+# no_current_pointer = true
+
+# Optional: also copy the staged binary into one or more project paths.
+# - If a path points to a directory, the binary filename (servo or servo.exe) is appended.
+# - If a path looks like a file (has an extension or basename), that filename is used verbatim.
+# CLI override: --copy_to <path> (can be passed multiple times by repeating the flag)
+# Default: empty list (no extra copies).
+# Example:
+# copy_to = ["versoview", "versoview/servo"]
+copy_to = []
