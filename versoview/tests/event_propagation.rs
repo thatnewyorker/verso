@@ -8,8 +8,8 @@ use std::thread;
 use std::time::Duration;
 
 use bincode;
+use photon_standalone::ipc_protocol as proto;
 use serde_json::json;
-use verso_standalone::ipc_protocol as proto;
 
 // --- Minimal framed transport helpers (copy of ipc_roundtrip.rs utilities) ---
 
@@ -121,8 +121,8 @@ fn level_to_str(l: proto::ConsoleLevel) -> &'static str {
 ///       the mapping shape is consistent and the EventBus works as expected.
 #[test]
 fn event_propagation_maps_and_emits_via_adapter() {
-    // Locate versoview binary
-    let bin = env::var("CARGO_BIN_EXE_versoview").ok().or_else(|| {
+    // Locate photon binary
+    let bin = env::var("CARGO_BIN_EXE_photon").ok().or_else(|| {
         let exe = env::current_exe().ok()?;
         let exe_dir = exe.parent()?;
         let candidates = [
@@ -141,7 +141,7 @@ fn event_propagation_maps_and_emits_via_adapter() {
             }
         }
         None
-    }).expect("versoview binary not found: set CARGO_BIN_EXE_versoview or ensure it's next to the test binary");
+    }).expect("photon binary not found: set CARGO_BIN_EXE_photon or ensure it's next to the test binary");
 
     // Spawn with stdio transport
     let mut child = Command::new(bin)

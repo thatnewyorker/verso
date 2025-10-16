@@ -8,7 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use bincode;
-use verso_standalone::ipc_protocol as proto;
+use photon_standalone::ipc_protocol as proto;
 
 fn serialize(env: &proto::Envelope) -> Vec<u8> {
     bincode::serde::encode_to_vec(env, bincode::config::standard()).expect("serialize envelope")
@@ -92,15 +92,15 @@ fn next_id(id: &mut u64) -> u64 {
 #[test]
 fn ipc_roundtrip_init_bind_load_and_events() {
     // Locate the compiled server binary. Cargo sets this env var for integration tests.
-    let bin = env::var("CARGO_BIN_EXE_versoview").ok().or_else(|| {
+    let bin = env::var("CARGO_BIN_EXE_photon").ok().or_else(|| {
         let exe = env::current_exe().ok()?;
         let exe_dir = exe.parent()?;
         let candidates = [
-            exe_dir.join("versoview"),
-            exe_dir.join("versoview.exe"),
-            exe_dir.join("../versoview"),
-            exe_dir.join("../versoview.exe"),
-            exe_dir.join("../../versoview"),
+            exe_dir.join("photon"),
+            exe_dir.join("photon.exe"),
+            exe_dir.join("../photon"),
+            exe_dir.join("../photon.exe"),
+            exe_dir.join("../../photon"),
             exe_dir.join("../../versoview.exe"),
             exe_dir.join("../../../versoview"),
             exe_dir.join("../../../versoview.exe"),
@@ -111,7 +111,7 @@ fn ipc_roundtrip_init_bind_load_and_events() {
             }
         }
         None
-    }).expect("versoview binary not found: set CARGO_BIN_EXE_versoview or ensure it's next to the test binary");
+    }).expect("photon binary not found: set CARGO_BIN_EXE_photon or ensure it's next to the test binary");
 
     // Spawn the server with piped stdio
     let mut child = Command::new(bin)

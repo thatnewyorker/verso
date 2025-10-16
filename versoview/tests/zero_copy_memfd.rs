@@ -21,7 +21,7 @@ use std::time::Duration;
 use bincode;
 use nix::sys::socket::{ControlMessageOwned, MsgFlags, cmsg_space, recvmsg};
 use nix::sys::uio::IoSliceMut;
-use verso_standalone::ipc_protocol as proto;
+use photon_standalone::ipc_protocol as proto;
 
 fn serialize(env: &proto::Envelope) -> Vec<u8> {
     bincode::serde::encode_to_vec(env, bincode::config::standard()).expect("serialize envelope")
@@ -121,13 +121,17 @@ fn recv_one_frame_with_fds(fd: RawFd, max_frame: usize) -> std::io::Result<(Vec<
 }
 
 fn find_versoview_binary() -> String {
-    if let Ok(bin) = env::var("CARGO_BIN_EXE_versoview") {
+    if let Ok(bin) = env::var("CARGO_BIN_EXE_photon") {
         return bin;
     }
     // Fallback: search near the test binary
     let exe = env::current_exe().expect("current_exe");
     let exe_dir = exe.parent().expect("exe parent");
     let candidates = [
+        exe_dir.join("photon"),
+        exe_dir.join("photon.exe"),
+        exe_dir.join("../photon"),
+        exe_dir.join("../photon.exe"),
         exe_dir.join("versoview"),
         exe_dir.join("versoview.exe"),
         exe_dir.join("../versoview"),
@@ -143,7 +147,7 @@ fn find_versoview_binary() -> String {
         }
     }
     panic!(
-        "versoview binary not found: set CARGO_BIN_EXE_versoview or ensure it's next to the test binary"
+        "photon binary not found: set CARGO_BIN_EXE_photon or ensure it's next to the test binary"
     );
 }
 

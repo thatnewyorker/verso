@@ -20,7 +20,7 @@
 use crate::engine::{Engine, EngineCapabilities, EngineError, EngineFrame, EngineInit};
 use std::hash::{Hash, Hasher};
 
-use verso_standalone::ipc_protocol as proto;
+use photon_standalone::ipc_protocol as proto;
 
 #[cfg(feature = "dioxus_engine")]
 use {

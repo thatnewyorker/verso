@@ -362,7 +362,16 @@ fn main() -> Result<()> {
         if let Some(parent) = ptr_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        if let Err(e) = fs::write(ptr_path, staged_abs.display().to_string()) {
+        let _atomic_write_res = (|| -> std::io::Result<()> {
+            let parent = ptr_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+            use std::io::Write;
+            write!(tmp, "{}", staged_abs.display())?;
+            tmp.persist(ptr_path).map(|_| ()).map_err(|e| e.error)
+        })();
+        if let Err(e) = _atomic_write_res {
             if args.strict_pointer {
                 return Err(anyhow!(
                     "failed to write servo pointer file {}: {}",
@@ -411,7 +420,16 @@ fn main() -> Result<()> {
         if let Some(parent) = pointer_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        if let Err(e) = fs::write(&pointer_path, staged_abs.display().to_string()) {
+        let _atomic_write_res = (|| -> std::io::Result<()> {
+            let parent = pointer_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+            use std::io::Write;
+            write!(tmp, "{}", staged_abs.display())?;
+            tmp.persist(&pointer_path).map(|_| ()).map_err(|e| e.error)
+        })();
+        if let Err(e) = _atomic_write_res {
             if args.strict_pointer {
                 return Err(anyhow!(
                     "failed to write --write-pointer file {}: {}",

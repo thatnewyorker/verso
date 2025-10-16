@@ -22,7 +22,7 @@ Typical flow:
    that forwards input and draw events to the mock controller (until the real runtime is enabled).
 */
 
-use verso_standalone::{
+use photon_standalone::{
     ControllerConfig, ControllerEventSubscriber, ControllerMode, NativeSurfaceHandles,
     VersoWebviewHost, WinitRuntime, WinitWindowHandle, logical_to_physical, map_winit_key,
     map_winit_mouse_button, set_verso_devtools_port, set_verso_path, set_verso_resource_directory,
@@ -35,7 +35,7 @@ use winit::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("verso-standalone winit_hello skeleton");
+    println!("photon-standalone winit_hello skeleton");
     println!(
         "Note: Window creation is available. Create windows from a non-UI thread after `run` starts."
     );
@@ -117,7 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Configure OutOfProcess binding for versoview (spawned by the IPC controller).
     // Adjust the versoview path if your binary is not located at this relative path.
-    eprintln!("winit_hello: configuring startup bind (OutOfProcess) for versoview");
+    eprintln!("winit_hello: configuring startup bind (OutOfProcess) for photon");
     set_verso_path("target/debug/versoview");
     // Optionally set resources/devtools:
     // set_verso_resource_directory("./static");

@@ -582,7 +582,7 @@ pub use real::ServoEngine;
 mod shim {
     use super::*;
     use crate::engine::{DemoEngine, EngineCapabilities, EngineFrame, EngineInit};
-    use verso_standalone::ipc_protocol as proto;
+    use photon_standalone::ipc_protocol as proto;
 
     // ServoEngine – shim that delegates to DemoEngine when `servo-engine` feature is disabled.
     pub struct ServoEngine {

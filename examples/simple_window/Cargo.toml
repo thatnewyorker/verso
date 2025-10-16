@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Verso runtime helpers and controllers (IPC + winit integration behind features)
-verso-standalone = { path = "../..", features = ["versoview-runtime"] }
+photon-standalone = { path = "../..", features = ["versoview-runtime"] }
 
 # Lightweight window + webview builder API
 window_manager = { path = "../../tools/window_manager" }

@@ -1,18 +1,18 @@
 [package]
-name = "versoview"
+name = "photon-view"
 version = "0.1.0"
 edition = "2024"
 description = "Out-of-process versoview server that speaks the Verso IPC protocol over framed stdio"
 license = "MIT OR Apache-2.0"
 
 [[bin]]
-name = "versoview"
+name = "photon"
 path = "src/main.rs"
 
 [features]
 default = []
 servo-engine = ["dep:libservo", "dep:image"]
-zero_copy = ["verso-standalone/zero_copy", "dep:nix", "dep:memmap2"]
+zero_copy = ["photon-standalone/zero_copy", "dep:nix", "dep:memmap2"]
 dioxus_engine = ["dep:dioxus", "dep:dioxus-html", "dep:dioxus-ssr", "dep:image"]
 tauri_ipc = ["dep:tauri_ipc_adapter"]
 tauri_compat_ipc = ["dep:tauri_compat_ipc"]
@@ -21,7 +21,7 @@ window_manager = ["dep:window_manager"]
 
 [dependencies]
 # Use the local verso-standalone crate for protocol and transport definitions.
-verso-standalone = { path = "..", features = ["versoview-runtime"] }
+photon-standalone = { path = "..", features = ["versoview-runtime"] }
 
 # Async runtime and utilities
 tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros", "io-std", "time"] }

@@ -1,5 +1,5 @@
 [package]
-name = "verso-standalone"
+name = "photon-standalone"
 version = "0.1.0"
 edition = "2024"
 

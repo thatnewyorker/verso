@@ -23,7 +23,7 @@ Notes:
 use std::fmt;
 use std::path::PathBuf;
 
-use verso_standalone::ipc_protocol as proto;
+use photon_standalone::ipc_protocol as proto;
 
 #[cfg(all(unix, feature = "zero_copy"))]
 use std::os::unix::io::OwnedFd;

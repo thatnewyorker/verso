@@ -6386,6 +6386,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "photon-standalone"
+version = "0.1.0"
+dependencies = [
+ "bincode 2.0.1",
+ "bytes",
+ "memmap2",
+ "nix",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "window_manager",
+ "winit",
+]
+
+[[package]]
+name = "photon-view"
+version = "0.1.0"
+dependencies = [
+ "bincode 2.0.1",
+ "bytes",
+ "clap",
+ "dioxus",
+ "dioxus-html",
+ "dioxus-ssr",
+ "image",
+ "libservo",
+ "memmap2",
+ "nix",
+ "photon-standalone",
+ "serde",
+ "serde_json",
+ "tauri_compat_ipc",
+ "tauri_ipc_adapter",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "window_manager",
+]
+
+[[package]]
 name = "pico-args"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7974,10 +8017,10 @@ dependencies = [
 name = "simple_window"
 version = "0.1.0"
 dependencies = [
+ "photon-standalone",
  "serde",
  "serde_json",
  "tauri_ipc_adapter",
- "verso-standalone",
  "window_manager",
  "winit",
 ]
@@ -9464,49 +9507,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "verso-standalone"
-version = "0.1.0"
-dependencies = [
- "bincode 2.0.1",
- "bytes",
- "memmap2",
- "nix",
- "raw-window-handle",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "window_manager",
- "winit",
-]
-
-[[package]]
-name = "versoview"
-version = "0.1.0"
-dependencies = [
- "bincode 2.0.1",
- "bytes",
- "clap",
- "dioxus",
- "dioxus-html",
- "dioxus-ssr",
- "image",
- "libservo",
- "memmap2",
- "nix",
- "serde",
- "serde_json",
- "tauri_compat_ipc",
- "tauri_ipc_adapter",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "verso-standalone",
- "window_manager",
-]
-
-[[package]]
 name = "virtue"
 version = "0.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10703,7 +10703,7 @@ dependencies = [
 name = "winit_hello"
 version = "0.1.0"
 dependencies = [
- "verso-standalone",
+ "photon-standalone",
  "winit",
 ]
 

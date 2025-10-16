@@ -5,6 +5,11 @@ use std::path::PathBuf;
 use bytes::Bytes;
 use clap::Parser;
 
+use photon_standalone::ipc_protocol as proto;
+use photon_standalone::ipc_transport::IpcTransport;
+#[cfg(all(unix, feature = "zero_copy"))]
+use photon_standalone::ipc_transport::OpaqueHandle;
+use photon_standalone::ipc_transport::StdIoTransport;
 #[cfg(any(feature = "tauri_ipc", feature = "tauri_compat_ipc"))]
 use std::sync::{Mutex, OnceLock};
 #[cfg(all(feature = "tauri_compat_ipc", not(feature = "tauri_ipc")))]
@@ -12,11 +17,6 @@ use tauri_compat_ipc::{ChannelAdapter, CommandRegistry, InvokeRequest, InvokeRes
 #[cfg(feature = "tauri_ipc")]
 use tauri_ipc_adapter::{ChannelAdapter, CommandRegistry, InvokeRequest, InvokeResponse};
 use tracing::{error, info, warn};
-use verso_standalone::ipc_protocol as proto;
-use verso_standalone::ipc_transport::IpcTransport;
-#[cfg(all(unix, feature = "zero_copy"))]
-use verso_standalone::ipc_transport::OpaqueHandle;
-use verso_standalone::ipc_transport::StdIoTransport;
 
 #[cfg(any(feature = "tauri_ipc", feature = "tauri_compat_ipc"))]
 static TAURI_CHANNEL: OnceLock<ChannelAdapter> = OnceLock::new();
@@ -33,7 +33,7 @@ use crate::dioxus_engine::DioxusEngine;
 use crate::engine::{DemoEngine, Engine, EngineFrame, EngineInit};
 use crate::servo_engine::ServoEngine;
 #[cfg(all(unix, feature = "zero_copy"))]
-use verso_standalone::transport_unix::UnixSocketTransport;
+use photon_standalone::transport_unix::UnixSocketTransport;
 
 enum TransportMode {
     Stdio,
@@ -43,8 +43,8 @@ enum TransportMode {
 
 #[derive(Debug, Parser, Clone)]
 #[command(
-    name = "versoview",
-    about = "Out-of-process versoview server that speaks the Verso IPC protocol over framed stdio"
+    name = "photon",
+    about = "Out-of-process Photon server that speaks the Verso IPC protocol over framed stdio"
 )]
 struct Args {
     /// Use a Unix-domain socket transport instead of stdio (Unix-only builds with zero-copy).
@@ -66,7 +66,7 @@ async fn main() {
         None => TransportMode::Stdio,
     };
 
-    // Discover Servo binary path: --servo-bin > VERSOVIEW_SERVO_PATH > VERSOVIEW_SERVO_POINTER > local pointer scan
+    // Discover Servo binary path: --servo-bin > PHOTON_SERVO_PATH > PHOTON_SERVO_POINTER > local pointer scan
     let cli_servo_bin: Option<PathBuf> = args.servo_bin.clone();
     let resolved_servo = (|| {
         if let Some(p) = cli_servo_bin.clone() {
@@ -74,13 +74,13 @@ async fn main() {
                 return Some(p);
             }
         }
-        if let Ok(envp) = std::env::var("VERSOVIEW_SERVO_PATH") {
+        if let Ok(envp) = std::env::var("PHOTON_SERVO_PATH") {
             let p = PathBuf::from(envp);
             if p.exists() {
                 return Some(p);
             }
         }
-        if let Ok(ptr) = std::env::var("VERSOVIEW_SERVO_POINTER") {
+        if let Ok(ptr) = std::env::var("PHOTON_SERVO_POINTER") {
             let pointer_path = PathBuf::from(ptr);
             if pointer_path.exists() {
                 if let Ok(s) = std::fs::read_to_string(&pointer_path) {
@@ -153,12 +153,12 @@ async fn main() {
         info!("Using Servo binary: {}", val);
     } else {
         info!(
-            "No Servo binary discovered (you can pass --servo-bin PATH or set VERSOVIEW_SERVO_PATH)"
+            "No Servo binary discovered (you can pass --servo-bin PATH or set PHOTON_SERVO_PATH)"
         );
     }
 
     if let Err(e) = run_server(mode).await {
-        error!("versoview server error: {e}");
+        error!("Photon server error: {e}");
         // Best effort flush before exit.
         // Note: stdout is managed by the transport; nothing else to flush here.
         std::process::exit(1);
@@ -194,10 +194,7 @@ async fn run_server(mode: TransportMode) -> Result<(), Box<dyn std::error::Error
         }
         #[cfg(all(unix, feature = "zero_copy"))]
         TransportMode::UnixSocket(path) => {
-            info!(
-                "versoview server starting (unix-socket transport: {})",
-                path
-            );
+            info!("Photon server starting (unix-socket transport: {})", path);
             Box::new(UnixSocketTransport::connect(path).await?)
         }
         #[cfg(not(all(unix, feature = "zero_copy")))]
@@ -207,8 +204,8 @@ async fn run_server(mode: TransportMode) -> Result<(), Box<dyn std::error::Error
         }
     };
 
-    let server_name = "versoview";
-    let engine_choice = std::env::var("VERSOVIEW_ENGINE").unwrap_or_else(|_| "servo".to_string());
+    let server_name = "photon";
+    let engine_choice = std::env::var("PHOTON_ENGINE").unwrap_or_else(|_| "servo".to_string());
     let mut engine: Box<dyn Engine> = if engine_choice.eq_ignore_ascii_case("demo") {
         Box::new(DemoEngine::new())
     } else if engine_choice.eq_ignore_ascii_case("dioxus") {
@@ -219,7 +216,7 @@ async fn run_server(mode: TransportMode) -> Result<(), Box<dyn std::error::Error
         #[cfg(not(feature = "dioxus_engine"))]
         {
             warn!(
-                "VERSOVIEW_ENGINE=dioxus requested but 'dioxus_engine' feature is not enabled; falling back to servo"
+                "PHOTON_ENGINE=dioxus requested but 'dioxus_engine' feature is not enabled; falling back to servo"
             );
             Box::new(ServoEngine::new())
         }
@@ -243,7 +240,7 @@ async fn run_server(mode: TransportMode) -> Result<(), Box<dyn std::error::Error
             Mutex::new(reg)
         });
     }
-    info!("versoview server started ({mode_desc})");
+    info!("Photon server started ({mode_desc})");
 
     loop {
         match transport.next_frame().await {
@@ -291,7 +288,7 @@ async fn run_server(mode: TransportMode) -> Result<(), Box<dyn std::error::Error
 
     // Attempt to gracefully close the writer.
     let _ = transport.close().await;
-    info!("versoview server exiting");
+    info!("Photon server exiting");
     Ok(())
 }
 
@@ -397,7 +394,7 @@ async fn handle_request(
             let evt = proto::Event::ConsoleMessage {
                 level: proto::ConsoleLevel::Info,
                 message: format!("Load requested: {url}"),
-                source: Some("versoview".to_string()),
+                source: Some("photon".to_string()),
                 line: None,
                 column: None,
             };
@@ -430,7 +427,7 @@ async fn handle_request(
             let evt = proto::Event::ConsoleMessage {
                 level: proto::ConsoleLevel::Debug,
                 message: "EvalScript received".to_string(),
-                source: Some("versoview".to_string()),
+                source: Some("photon".to_string()),
                 line: None,
                 column: None,
             };
@@ -654,7 +651,7 @@ async fn handle_request(
                 let evt = proto::Event::ConsoleMessage {
                     level: proto::ConsoleLevel::Info,
                     message: "Draw requested (no frame produced)".to_string(),
-                    source: Some("versoview".to_string()),
+                    source: Some("photon".to_string()),
                     line: None,
                     column: None,
                 };
