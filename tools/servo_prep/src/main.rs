@@ -114,6 +114,16 @@ struct Args {
     /// Output directory for packaged artifacts (defaults to <workspace>/dist).
     #[arg(long)]
     out_dir: Option<PathBuf>,
+
+    /// Optional file to write the absolute path of the staged servo binary.
+    /// If provided, this file will be created/overwritten with a single line path.
+    #[arg(long)]
+    servo_out: Option<PathBuf>,
+
+    /// If set, write a convenience pointer under the staging slot: `current/servo_path.txt`
+    /// (or `<commit>/servo_path.txt` if symlinks are unavailable). Best effort.
+    #[arg(long, action = ArgAction::SetTrue)]
+    write_pointer: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -287,16 +297,12 @@ fn main() -> Result<()> {
     fs::write(&meta_path, meta_toml)?;
 
     // Update "current" symlink or latest.json manifest at <ws_root>/<output_base>/<target>/<profile>/
-    let slot_dir = dest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            anyhow!(
-                "unexpected layout computing slot dir from {}",
-                dest_dir.display()
-            )
-        })?;
+    let slot_dir = dest_dir.parent().map(PathBuf::from).ok_or_else(|| {
+        anyhow!(
+            "unexpected layout computing slot dir from {}",
+            dest_dir.display()
+        )
+    })?;
     let disable_pointer = args.no_current_pointer || cfg.no_current_pointer.unwrap_or(false);
     if !disable_pointer {
         update_current_pointer(&slot_dir, &commit, args.verbose)?;
@@ -343,6 +349,71 @@ fn main() -> Result<()> {
             let mut perm = fs::metadata(&dest_path)?.permissions();
             perm.set_mode(0o755);
             fs::set_permissions(&dest_path, perm)?;
+        }
+    }
+
+    // Write pointer file to staged servo binary if requested
+    if let Some(ptr_path) = args.servo_out.as_ref() {
+        let staged_abs = dest_bin.canonicalize().unwrap_or(dest_bin.clone());
+        if let Some(parent) = ptr_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(e) = fs::write(ptr_path, staged_abs.display().to_string()) {
+            if args.verbose {
+                eprintln!(
+                    "Warning: failed to write servo pointer file {}: {}",
+                    ptr_path.display(),
+                    e
+                );
+            }
+        } else if args.verbose {
+            eprintln!(
+                "Wrote servo pointer file: {} -> {}",
+                ptr_path.display(),
+                staged_abs.display()
+            );
+        }
+    }
+
+    // Convenience: write pointer in current/ or commit dir when --write-pointer is set
+    if args.write_pointer {
+        let staged_abs = dest_bin.canonicalize().unwrap_or(dest_bin.clone());
+        let current_path = slot_dir.join("current");
+        let pointer_path = if !disable_pointer && current_path.exists() {
+            current_path.join("servo_path.txt")
+        } else {
+            // Fall back to commit dir, optionally using latest.json if present.
+            let mut commit_dir = slot_dir.join(&commit);
+            let latest_path = slot_dir.join("latest.json");
+            if latest_path.exists() {
+                if let Ok(s) = fs::read_to_string(&latest_path) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                        if let Some(c) = v.get("current").and_then(|x| x.as_str()) {
+                            commit_dir = slot_dir.join(c);
+                        }
+                    }
+                }
+            }
+            commit_dir.join("servo_path.txt")
+        };
+
+        if let Some(parent) = pointer_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(e) = fs::write(&pointer_path, staged_abs.display().to_string()) {
+            if args.verbose {
+                eprintln!(
+                    "Warning: failed to write --write-pointer file {}: {}",
+                    pointer_path.display(),
+                    e
+                );
+            }
+        } else if args.verbose {
+            eprintln!(
+                "Wrote convenience pointer: {} -> {}",
+                pointer_path.display(),
+                staged_abs.display()
+            );
         }
     }
 

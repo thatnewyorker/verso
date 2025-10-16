@@ -147,6 +147,60 @@ Example:
 Use these fields to validate artifacts and trace builds in CI.
 
 
+## Servo staging pointer file (convenience)
+
+Two convenience options help downstream tools discover the staged Servo binary without scanning directories:
+
+- `--servo-out <PATH>`: write a single-line file at PATH containing the absolute path to the staged binary.
+- `--write-pointer`: write a single-line file `servo_path.txt` inside the staging “current” slot:
+  - Preferred: `<workspace>/third_party/servo-binaries/local/<target>/<profile>/current/servo_path.txt`
+  - Fallback (when symlinks are unavailable): use `latest.json` to find the active `<commit>` and write to `<workspace>/third_party/servo-binaries/local/<target>/<profile>/<commit>/servo_path.txt`
+
+Notes:
+- Both flags can be used together. When both are provided, both pointer files are written.
+- Writes are best-effort: failures emit a warning and do not fail the run.
+- The file content is a single absolute path to the staged binary.
+
+Examples:
+- Write an explicit pointer file (metadata-only staging):
+```
+cargo run -p servo_prep -- \
+  --servo-src /path/to/servo \
+  --metadata-only \
+  --profile release \
+  --servo-out /tmp/servo_path.txt
+```
+
+- Write the default pointer next to the “current” slot:
+```
+cargo run -p servo_prep -- \
+  --servo-src /path/to/servo \
+  --profile release \
+  --write-pointer
+```
+
+Consuming the pointer in scripts:
+- POSIX shells (bash/zsh):
+```
+VERSOVIEW_SERVO_PATH="$(cat third_party/servo-binaries/local/<target>/<profile>/current/servo_path.txt)"
+export VERSOVIEW_SERVO_PATH
+```
+
+- Windows PowerShell:
+```
+$env:VERSOVIEW_SERVO_PATH = Get-Content "third_party/servo-binaries\local\<target>\<profile>\current\servo_path.txt"
+```
+
+Expected file content:
+```
+/absolute/path/to/repo/third_party/servo-binaries/local/<target>/<profile>/<commit>/servo[.exe]
+```
+
+Behavior when symlinks are not available:
+- `servo_prep` writes `latest.json` in the `<target>/<profile>/` directory:
+  - Example: `{"current": "<commit>", "updated_at": "..." }`
+- `--write-pointer` uses that `current` commit to place `servo_path.txt` in the commit directory.
+
 ## 7) AppImage (Linux), DMG (macOS), MSI (Windows)
 
 Planned implementations in `servo_prep`:

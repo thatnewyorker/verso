@@ -409,6 +409,10 @@ pub struct WinitRuntime<T: 'static = ()> {
     external_user_rx: Arc<Mutex<Option<mpsc::Receiver<T>>>>,
     /// Optional window to create automatically when the event loop resumes.
     startup_window: Arc<Mutex<Option<WindowAttributes>>>,
+    /// Optional controller configuration to auto-bind a host to the startup window.
+    startup_bind: Arc<Mutex<Option<ControllerConfig>>>,
+    /// Optional startup URL to auto-load after binding the host.
+    startup_load_url: Arc<Mutex<Option<String>>>,
 }
 
 impl<T> Default for WinitRuntime<T>
@@ -433,6 +437,8 @@ where
             external_user_tx: Arc::new(Mutex::new(None)),
             external_user_rx: Arc::new(Mutex::new(None)),
             startup_window: Arc::new(Mutex::new(None)),
+            startup_bind: Arc::new(Mutex::new(None)),
+            startup_load_url: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -474,6 +480,22 @@ where
     pub fn set_startup_window(&self, attrs: WindowAttributes) {
         let mut g = self.startup_window.lock().unwrap();
         *g = Some(attrs);
+    }
+
+    /// Set a controller configuration to auto-bind a host to the startup window on resume.
+    ///
+    /// When set, the runtime will, after creating the startup window on the event-loop thread,
+    /// bind a `VersoWebviewHost` in OutOfProcess mode using this configuration and attach it
+    /// to the window record, so subscribers can forward events to the controller immediately.
+    pub fn set_startup_bind_config(&self, cfg: ControllerConfig) {
+        let mut g = self.startup_bind.lock().unwrap();
+        *g = Some(cfg);
+    }
+
+    /// Set a URL to auto-load on the startup host after successful bind.
+    pub fn set_startup_load_url(&self, url: impl Into<String>) {
+        let mut g = self.startup_load_url.lock().unwrap();
+        *g = Some(url.into());
     }
 
     /// Register an event subscriber for a given window.
@@ -779,8 +801,33 @@ where
         );
         if let Some(attrs) = maybe_attrs {
             match _event_loop.create_window(attrs) {
-                Ok(window) => {
+                Ok(mut window) => {
                     let id = window.id();
+
+                    // Prepare native surface handles before moving the window.
+                    let handles = match window.window_handle() {
+                        Ok(wh) => NativeSurfaceHandles {
+                            window: wh.as_raw(),
+                            display: window.display_handle().ok().map(|d| d.as_raw()),
+                        },
+                        Err(e) => {
+                            eprintln!("WinitRuntime: failed to read native handles: {e:?}");
+                            // Track the window even if handles failed.
+                            self.windows.insert(id, window);
+                            self.runtime
+                                .windows
+                                .lock()
+                                .unwrap()
+                                .entry(id)
+                                .or_insert_with(WindowRecord::default);
+                            eprintln!(
+                                "WinitRuntime: startup window created (no handles): {:?}",
+                                id
+                            );
+                            return;
+                        }
+                    };
+
                     // Track the real window
                     self.windows.insert(id, window);
                     // Initialize subscriber list in the runtime registry
@@ -790,7 +837,67 @@ where
                         .unwrap()
                         .entry(id)
                         .or_insert_with(WindowRecord::default);
+
                     eprintln!("WinitRuntime: startup window created: {:?}", id);
+
+                    // If a startup bind config is present, bind a host and attach it.
+                    let bind_cfg_opt = {
+                        let mut guard = self.runtime.startup_bind.lock().unwrap();
+                        guard.take()
+                    };
+                    if let Some(cfg) = bind_cfg_opt {
+                        let handle = WinitWindowHandle::new(id);
+                        let mut host = VersoWebviewHost::new(handle);
+                        match host.bind_native_surface(handles, cfg) {
+                            Ok(()) => {
+                                // Optionally auto-load a startup URL before attaching the host.
+                                let maybe_url = {
+                                    let mut guard = self.runtime.startup_load_url.lock().unwrap();
+                                    guard.take()
+                                };
+                                if let Some(url) = maybe_url {
+                                    match host.load(&url) {
+                                        Ok(()) => {
+                                            eprintln!(
+                                                "WinitRuntime: auto-loaded startup URL: {}",
+                                                url
+                                            );
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "WinitRuntime: failed to auto-load '{}': {}",
+                                                url, e
+                                            );
+                                        }
+                                    }
+                                }
+
+                                // Attach host to window record and auto-register controller event subscriber.
+                                if let Some(record) =
+                                    self.runtime.windows.lock().unwrap().get_mut(&id)
+                                {
+                                    record.host = Some(host);
+                                    record
+                                        .subscribers
+                                        .push(Box::new(ControllerEventSubscriber::new(handle)));
+                                    eprintln!(
+                                        "WinitRuntime: startup host bound, attached, and subscriber registered for {:?}",
+                                        id
+                                    );
+                                }
+                                // Best-effort: request an initial redraw
+                                if let Some(w) = self.windows.get(&id) {
+                                    w.request_redraw();
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "WinitRuntime: startup host bind failed for {:?}: {}",
+                                    id, e
+                                );
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     eprintln!("WinitRuntime: startup window creation failed: {e:?}");

@@ -23,8 +23,9 @@ Typical flow:
 */
 
 use verso_standalone::{
-    NativeSurfaceHandles, VersoWebviewHost, WinitRuntime, WinitWindowHandle, logical_to_physical,
-    map_winit_key, map_winit_mouse_button,
+    ControllerConfig, ControllerEventSubscriber, ControllerMode, NativeSurfaceHandles,
+    VersoWebviewHost, WinitRuntime, WinitWindowHandle, logical_to_physical, map_winit_key,
+    map_winit_mouse_button, set_verso_devtools_port, set_verso_path, set_verso_resource_directory,
 };
 
 use winit::{
@@ -112,6 +113,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         winit::window::Window::default_attributes()
             .with_title("Verso Hello".to_string())
             .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0)),
+    );
+
+    // Configure OutOfProcess binding for versoview (spawned by the IPC controller).
+    // Adjust the versoview path if your binary is not located at this relative path.
+    eprintln!("winit_hello: configuring startup bind (OutOfProcess) for versoview");
+    set_verso_path("target/debug/versoview");
+    // Optionally set resources/devtools:
+    // set_verso_resource_directory("./static");
+    set_verso_devtools_port(0);
+    // Default engine choice to 'dioxus' if not set by the environment.
+    // You can override by setting VERSOVIEW_ENGINE before launching.
+    // Note: set VERSOVIEW_ENGINE in your environment before launch to pick an engine (e.g., dioxus).
+
+    let mut cfg = ControllerConfig::default();
+    cfg.mode = ControllerMode::OutOfProcess;
+    // cfg.external_bin_path = Some(std::path::PathBuf::from("target/debug/versoview"));
+    // cfg.resources_dir = Some(std::path::PathBuf::from("./static"));
+    // cfg.user_agent = Some("Verso Demo UA".into());
+
+    // Ask the runtime to auto-bind a host to the startup window on resume.
+    runtime.set_startup_bind_config(cfg);
+    // Auto-load demo content so the window shows frames immediately.
+    runtime.set_startup_load_url(
+        "data:text/html,<h1>Verso Hello</h1><p>Auto-loaded demo content.</p>",
     );
 
     // Start the winit event loop (blocks until all windows are closed).
