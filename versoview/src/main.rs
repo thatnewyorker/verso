@@ -1,6 +1,9 @@
 use std::cmp;
 
+use std::path::PathBuf;
+
 use bytes::Bytes;
+use clap::Parser;
 
 #[cfg(any(feature = "tauri_ipc", feature = "tauri_compat_ipc"))]
 use std::sync::{Mutex, OnceLock};
@@ -38,22 +41,121 @@ enum TransportMode {
     UnixSocket(String),
 }
 
+#[derive(Debug, Parser, Clone)]
+#[command(
+    name = "versoview",
+    about = "Out-of-process versoview server that speaks the Verso IPC protocol over framed stdio"
+)]
+struct Args {
+    /// Use a Unix-domain socket transport instead of stdio (Unix-only builds with zero-copy).
+    #[arg(long = "unix-socket")]
+    unix_socket: Option<String>,
+
+    /// Absolute path to the Servo binary to use. Overrides env-based or pointer-file discovery.
+    #[arg(long = "servo-bin")]
+    servo_bin: Option<PathBuf>,
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     init_tracing();
 
-    let mut args = std::env::args().skip(1);
-    let mode = match args.next().as_deref() {
-        Some("--unix-socket") => {
-            if let Some(path) = args.next() {
-                TransportMode::UnixSocket(path)
-            } else {
-                warn!("--unix-socket flag requires a path argument; falling back to stdio.");
-                TransportMode::Stdio
+    let args = Args::parse();
+    let mode = match args.unix_socket.as_ref() {
+        Some(path) => TransportMode::UnixSocket(path.clone()),
+        None => TransportMode::Stdio,
+    };
+
+    // Discover Servo binary path: --servo-bin > VERSOVIEW_SERVO_PATH > VERSOVIEW_SERVO_POINTER > local pointer scan
+    let cli_servo_bin: Option<PathBuf> = args.servo_bin.clone();
+    let resolved_servo = (|| {
+        if let Some(p) = cli_servo_bin.clone() {
+            if p.exists() {
+                return Some(p);
             }
         }
-        _ => TransportMode::Stdio,
-    };
+        if let Ok(envp) = std::env::var("VERSOVIEW_SERVO_PATH") {
+            let p = PathBuf::from(envp);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        if let Ok(ptr) = std::env::var("VERSOVIEW_SERVO_POINTER") {
+            let pointer_path = PathBuf::from(ptr);
+            if pointer_path.exists() {
+                if let Ok(s) = std::fs::read_to_string(&pointer_path) {
+                    let p = PathBuf::from(s.trim());
+                    if p.exists() {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+        let base = std::env::current_dir()
+            .ok()?
+            .join("third_party/servo-binaries/local");
+        if base.is_dir() {
+            if let Ok(targets) = std::fs::read_dir(&base) {
+                for t in targets.flatten() {
+                    let tpath = t.path();
+                    if tpath.is_dir() {
+                        if let Ok(profiles) = std::fs::read_dir(&tpath) {
+                            for pr in profiles.flatten() {
+                                let prpath = pr.path();
+                                if prpath.is_dir() {
+                                    let cur_ptr = prpath.join("current").join("servo_path.txt");
+                                    if cur_ptr.exists() {
+                                        if let Ok(s) = std::fs::read_to_string(&cur_ptr) {
+                                            let p = PathBuf::from(s.trim());
+                                            if p.exists() {
+                                                return Some(p);
+                                            }
+                                        }
+                                    }
+                                    let latest = prpath.join("latest.json");
+                                    if latest.exists() {
+                                        if let Ok(s) = std::fs::read_to_string(&latest) {
+                                            if let Ok(v) =
+                                                serde_json::from_str::<serde_json::Value>(&s)
+                                            {
+                                                if let Some(commit) =
+                                                    v.get("current").and_then(|x| x.as_str())
+                                                {
+                                                    let ptr =
+                                                        prpath.join(commit).join("servo_path.txt");
+                                                    if ptr.exists() {
+                                                        if let Ok(s2) =
+                                                            std::fs::read_to_string(&ptr)
+                                                        {
+                                                            let p = PathBuf::from(s2.trim());
+                                                            if p.exists() {
+                                                                return Some(p);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    })();
+
+    if let Some(bin) = resolved_servo {
+        let val = bin.display().to_string();
+
+        info!("Using Servo binary: {}", val);
+    } else {
+        info!(
+            "No Servo binary discovered (you can pass --servo-bin PATH or set VERSOVIEW_SERVO_PATH)"
+        );
+    }
 
     if let Err(e) = run_server(mode).await {
         error!("versoview server error: {e}");
@@ -375,6 +477,7 @@ async fn handle_request(
             }
             #[cfg(not(any(feature = "tauri_ipc", feature = "tauri_compat_ipc")))]
             {
+                let _ = (&command, &payload, &request_id);
                 let resp = proto::Response::InvokeResult {
                     in_reply_to: req_id,
                     ok: false,

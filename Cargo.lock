@@ -9486,6 +9486,7 @@ version = "0.1.0"
 dependencies = [
  "bincode 2.0.1",
  "bytes",
+ "clap",
  "dioxus",
  "dioxus-html",
  "dioxus-ssr",
@@ -9497,6 +9498,7 @@ dependencies = [
  "serde_json",
  "tauri_compat_ipc",
  "tauri_ipc_adapter",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

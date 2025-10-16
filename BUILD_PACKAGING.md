@@ -158,7 +158,7 @@ Two convenience options help downstream tools discover the staged Servo binary w
 
 Notes:
 - Both flags can be used together. When both are provided, both pointer files are written.
-- Writes are best-effort: failures emit a warning and do not fail the run.
+- Writes are best-effort by default; pass `--strict-pointer` to fail the run on pointer write errors.
 - The file content is a single absolute path to the staged binary.
 
 Examples:

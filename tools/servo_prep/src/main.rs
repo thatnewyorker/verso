@@ -124,6 +124,10 @@ struct Args {
     /// (or `<commit>/servo_path.txt` if symlinks are unavailable). Best effort.
     #[arg(long, action = ArgAction::SetTrue)]
     write_pointer: bool,
+
+    /// If set, fail the run on pointer write errors (affects --servo-out and --write-pointer).
+    #[arg(long, action = ArgAction::SetTrue)]
+    strict_pointer: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -359,6 +363,13 @@ fn main() -> Result<()> {
             let _ = fs::create_dir_all(parent);
         }
         if let Err(e) = fs::write(ptr_path, staged_abs.display().to_string()) {
+            if args.strict_pointer {
+                return Err(anyhow!(
+                    "failed to write servo pointer file {}: {}",
+                    ptr_path.display(),
+                    e
+                ));
+            }
             if args.verbose {
                 eprintln!(
                     "Warning: failed to write servo pointer file {}: {}",
@@ -401,6 +412,13 @@ fn main() -> Result<()> {
             let _ = fs::create_dir_all(parent);
         }
         if let Err(e) = fs::write(&pointer_path, staged_abs.display().to_string()) {
+            if args.strict_pointer {
+                return Err(anyhow!(
+                    "failed to write --write-pointer file {}: {}",
+                    pointer_path.display(),
+                    e
+                ));
+            }
             if args.verbose {
                 eprintln!(
                     "Warning: failed to write --write-pointer file {}: {}",
